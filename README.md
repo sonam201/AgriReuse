@@ -1,17 +1,19 @@
 # AgriReuse demo
 
 AI-style agricultural circular marketplace demo (climate hackathon). Synthetic data, simulated transactions.
-Static Vite project: the whole app is in `index.html` (HTML, CSS, JS). No backend, no API keys needed.
+Next.js (App Router, TypeScript) project. Client-side only: no backend, no API keys needed.
+- `lib/`: types, seed data, matching / safety gate / economics / CO2e logic, scripted assistant parser
+- `components/App.tsx`: state, persistence and actions; `components/views/`: one component per tab
+- `app/`: layout, page, global styles
 
 ## Run locally
     npm install
-    npm run dev        # http://localhost:5173
-    npm run build      # outputs dist/
+    npm run dev                  # http://localhost:3000
+    npm run build && npm start   # production
 
 ## Deploy (free)
-- Vercel: `npx vercel --prod` (project name `agrireuse-demo`), or import the repo at vercel.com.
-- Netlify: build command `npm run build`, publish directory `dist`.
-- Quick option without Node: drag only `index.html` (in its own folder) onto app.netlify.com/drop.
+- Vercel: `npx vercel --prod` (project name `agrireuse-demo`), or import the repo at vercel.com (Next.js is auto-detected).
+- Netlify: import the repo; the Next.js runtime is detected automatically.
 
 ## Implemented
 Create Listing (scripted Demo assistant + optional browser voice input), 50 supply / 40 demand listings,
@@ -25,5 +27,4 @@ distances (straight-line x multiplier, indicative only), emission factors (illus
 all businesses (fictional). No carbon credits.
 
 ## Known limitations
-No automated tests yet; no listing editing after creation; no sensitivity table; no live Gemini function;
-single-file code. Data lives in browser localStorage (Profile > Reset demo data).
+No automated tests yet; no listing editing after creation; no sensitivity table; no live Gemini function. Data lives in browser localStorage (Profile > Reset demo data).
