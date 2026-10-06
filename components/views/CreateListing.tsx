@@ -46,17 +46,13 @@ export default function CreateListing({ S, A, draft }: { S: State; A: Actions; d
 
   return (
     <>
-      {!d?.editId && (
-        <>
-          <div className="hero">
-            <h1>List it. Match it. Reuse it. 🌾</h1>
-            <p>
-              {S.L.filter(l => l.type == 'Supply' && !l.arch).length} supplies · {S.L.filter(l => l.type == 'Demand' && !l.arch).length} demands · {businessCount(S)} farmers &amp; businesses
-            </p>
-            <button className="btn alt" onClick={A.guided}>▶ Try guided demo</button>{' '}
-            <button className="btn alt" onClick={() => A.go('Matches')}>🤝 See matches</button>
-          </div>
-        </>
+      {d?.editId ? <h2>Edit listing</h2> : (
+        <div className="hero">
+          <h1>List it. Match it. Reuse it. 🌾</h1>
+          <p style={{ margin: 0 }}>
+            {S.L.filter(l => l.type == 'Supply' && !l.arch && !l.deletedAt).length} supplies · {S.L.filter(l => l.type == 'Demand' && !l.arch && !l.deletedAt).length} requests · {businessCount(S)} farmers &amp; businesses
+          </p>
+        </div>
       )}
 
       <div className="mode-switch" role="tablist" aria-label="How to create the listing">

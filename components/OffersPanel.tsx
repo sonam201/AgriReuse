@@ -1,67 +1,75 @@
 'use client'
 
 import { useState } from 'react'
-import { f1 } from '@/lib/logic'
-import type { Listing, Offer, State } from '@/lib/types'
+import { avail, f1 } from '@/lib/logic'
+import type { Listing, Offer, State, Supply } from '@/lib/types'
 import type { Actions } from './App'
 
 const STATUS: Record<Offer['status'], string> = {
-  pending: '⏳ Waiting', accepted: '✅ Accepted', declined: '✖ Declined', countered: '↩️ Countered', withdrawn: '— Withdrawn',
+  pending: '⏳ Waiting for a reply', accepted: '✅ Approved, deal started', declined: '✖ Declined', countered: '↩️ Countered', withdrawn: '— Withdrawn',
 }
 
-function OfferRow({ o, S, A }: { o: Offer; S: State; A: Actions }) {
-  const [counter, setCounter] = useState('')
+function RequestRow({ o, S, A }: { o: Offer; S: State; A: Actions }) {
   const [countering, setCountering] = useState(false)
-  const s = S.L.find(l => l.id == o.s), d = S.L.find(l => l.id == o.d)
+  const [price, setPrice] = useState(String(o.price))
+  const [q, setQ] = useState(String(o.q))
+  const s = S.L.find(l => l.id == o.s) as Supply | undefined, d = S.L.find(l => l.id == o.d)
   if (!s || !d) return null
   const iSupply = s.ownerId == S.me.id
   const other: Listing = iSupply ? d : s
-  const incoming = o.to == S.me.id && o.status == 'pending'
-  const outgoing = o.from == S.me.id && o.status == 'pending'
+  const toMe = o.to == S.me.id && o.status == 'pending'
+  const fromMe = o.from == S.me.id && o.status == 'pending'
+  const counterOk = price !== '' && +price >= 0 && +q > 0 && +q <= avail(s) + 1e-9
 
   return (
-    <div className="action-item">
+    <div className="action-item request-row">
       <div>
-        <b>{incoming ? `${other.biz} offers` : outgoing ? `You offered ${other.biz}` : `${other.biz}`}: ${o.price}/t for {f1(o.q)} t of {s.mat}</b>
+        <b>
+          {toMe ? `${other.biz} asks:` : fromMe ? `You asked ${other.biz}:` : `${other.biz}:`} {f1(o.q)} t of {s.mat} at {o.price == 0 ? 'no charge' : `$${o.price}/t`}
+        </b>
         <div className="s">
-          {iSupply ? 'You’re selling' : 'You’re buying'} · {STATUS[o.status]}{o.note ? ` · ${o.note}` : ''}
-          {o.message ? ` · “${o.message}”` : ''}
+          {iSupply ? 'You’re selling' : 'You’re buying'} · {STATUS[o.status]}{o.note ? ` · ${o.note}` : ''}{o.message ? ` · “${o.message}”` : ''}
         </div>
       </div>
-      {incoming && !countering && (
+      {toMe && !countering && (
         <span>
-          <button className="btn" disabled={A.busy} onClick={() => A.respondOffer(o.id, 'accept')}>Accept</button>{' '}
-          <button className="btn alt" disabled={A.busy} onClick={() => { setCounter(String(o.price)); setCountering(true) }}>Counter</button>{' '}
+          <button className="btn" disabled={A.busy} onClick={() => A.respondOffer(o.id, 'accept')}>Approve</button>{' '}
+          <button className="btn alt" disabled={A.busy} onClick={() => setCountering(true)}>Counter</button>{' '}
           <button className="btn alt" disabled={A.busy} onClick={() => A.respondOffer(o.id, 'decline')}>Decline</button>
         </span>
       )}
-      {incoming && countering && (
+      {toMe && countering && (
         <span className="counter">
-          <input type="number" min={0} step={1} value={counter} onChange={e => setCounter(e.target.value)} aria-label="Counter price per tonne" />
-          <button className="btn" disabled={A.busy || !(+counter >= 0) || counter === ''} onClick={() => A.respondOffer(o.id, 'counter', +counter)}>Send $/t</button>
+          <input type="number" min={0} step={0.1} value={q} onChange={e => setQ(e.target.value)} aria-label="Counter amount in tonnes" title="Tonnes" />
+          <span className="s">t at $</span>
+          <input type="number" min={0} step={1} value={price} onChange={e => setPrice(e.target.value)} aria-label="Counter price per tonne" title="$ per tonne" />
+          <span className="s">/t</span>
+          <button className="btn" disabled={A.busy || !counterOk} onClick={() => A.respondOffer(o.id, 'counter', +price, +q)}>Send counter</button>
           <button className="btn alt" onClick={() => setCountering(false)}>Cancel</button>
         </span>
       )}
-      {outgoing && <button className="btn alt" disabled={A.busy} onClick={() => A.respondOffer(o.id, 'withdraw')}>Withdraw</button>}
+      {fromMe && <button className="btn alt" disabled={A.busy} onClick={() => A.respondOffer(o.id, 'withdraw')}>Withdraw</button>}
     </div>
   )
 }
 
+// Deal requests: nothing is agreed until the other side approves.
 export default function OffersPanel({ S, A }: { S: State; A: Actions }) {
-  const incoming = S.O.filter(o => o.to == S.me.id && o.status == 'pending')
-  const outgoing = S.O.filter(o => o.from == S.me.id && o.status == 'pending')
+  const toMe = S.O.filter(o => o.to == S.me.id && o.status == 'pending')
+  const fromMe = S.O.filter(o => o.from == S.me.id && o.status == 'pending')
   const recent = S.O.filter(o => o.status != 'pending').slice(0, 5)
   if (!S.O.length) return null
   return (
     <div className="card">
-      <h3>💬 Offers {incoming.length > 0 && <span className="tag restricted">{incoming.length} to answer</span>}</h3>
-      {incoming.map(o => <OfferRow key={o.id} o={o} S={S} A={A} />)}
-      {outgoing.map(o => <OfferRow key={o.id} o={o} S={S} A={A} />)}
-      {incoming.length + outgoing.length == 0 && <p className="s">No open offers.</p>}
+      <h3>🤝 Deal requests {toMe.length > 0 && <span className="tag restricted">{toMe.length} to answer</span>}</h3>
+      {toMe.length > 0 && <p className="s">Approving starts the deal and reserves the tonnes.</p>}
+      {toMe.map(o => <RequestRow key={o.id} o={o} S={S} A={A} />)}
+      {fromMe.map(o => <RequestRow key={o.id} o={o} S={S} A={A} />)}
+      {toMe.length + fromMe.length == 0 && <p className="s">No open requests.</p>}
       {recent.length > 0 && (
         <details>
-          <summary>Recent offers ({recent.length})</summary>
-          {recent.map(o => <OfferRow key={o.id} o={o} S={S} A={A} />)}
+          <summary>Recent requests ({recent.length})</summary>
+          {recent.map(o => <RequestRow key={o.id} o={o} S={S} A={A} />)}
         </details>
       )}
     </div>

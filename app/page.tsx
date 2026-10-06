@@ -36,7 +36,7 @@ export default function Landing() {
       <AuthRedirect />
       <header>
         <b>🌱 AgriReuse</b>
-        <span className="demo">Payments simulated</span>
+        <span className="demo hide-sm">Payments simulated</span>
         <span className="header-actions">
           <Link className="btn alt" href="/app?mode=in">Sign in</Link>
           <Link className="btn" href="/app?mode=up">Sign up</Link>

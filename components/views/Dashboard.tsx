@@ -2,16 +2,17 @@
 
 import { useEffect, useState } from 'react'
 import { CATEGORIES, USE_LABELS } from '@/lib/compliance'
-import { STEPS } from '@/lib/data'
+import { STEP_ACTION } from '@/lib/data'
 import {
   allMatches, avail, categoryOf, complianceOf, counterpartyName, daysUntil, endingSoon, f1, hasOpenExchange, isOpen,
-  keywordTokens, kmNotDriven, listing, money, myBenefit, myMatches, myTransactions, sideTransactions, stepActor, turn,
+  keywordTokens, kmNotDriven, listing, money, myBenefit, myMatches, myTransactions, nextStep, sideTransactions, turn,
   txCo2, weekly, wheelieBins,
 } from '@/lib/logic'
 import type { Demand, Listing, State, Supply } from '@/lib/types'
 import type { Actions } from '../App'
 import { ComplianceBadge } from '../Compliance'
 import WeeklyChart from '../WeeklyChart'
+import { Pager, usePage } from '../Pager'
 import { MatchCard, type Scored } from './Matches'
 
 const catName = (id: string | null | undefined) => CATEGORIES.find(c => c.id == id)?.label ?? 'other'
@@ -73,8 +74,9 @@ export default function Dashboard({ S, A }: { S: State; A: Actions }) {
 
   const supplier = S.view == 'Supplier'
   // Listings, numbers and market picture follow the side being viewed; to-dos cover both sides.
-  const myListings = S.L.filter(l => l.ownerId == S.me.id && !l.deletedAt && l.type == (supplier ? 'Supply' : 'Demand'))
+  const myListings = S.L.filter(l => l.ownerId == S.me.id && !l.deletedAt && !l.private && l.type == (supplier ? 'Supply' : 'Demand'))
   const active = myListings.filter(l => !l.arch)
+  const glancePg = usePage(active, S.view)
   const txs = sideTransactions(S)
   const allOpen = myTransactions(S).filter(isOpen)
   const open = txs.filter(isOpen)
@@ -138,8 +140,8 @@ export default function Dashboard({ S, A }: { S: State; A: Actions }) {
           return (
             <div className="action-item" key={o.id}>
               <div>
-                <b>Offer from {other.biz}: ${o.price}/t</b>
-                <div className="s">{f1(o.q)} t of {s.mat}{o.message ? ` · “${o.message}”` : ''}</div>
+                <b>Deal request from {other.biz}: ${o.price}/t for {f1(o.q)} t</b>
+                <div className="s">{s.mat}{o.message ? ` · “${o.message}”` : ''} · approve, counter or decline</div>
               </div>
               <button className="btn" onClick={() => A.go('Transactions')}>Reply</button>
             </div>
@@ -147,14 +149,19 @@ export default function Dashboard({ S, A }: { S: State; A: Actions }) {
         })}
 
         {myTurn.map(t => {
-          const next = STEPS[t.step + 1], sim = turn(S, t) == 'simulated'
+          const n = nextStep(t), action = STEP_ACTION[n], needsDetails = n == 2 || n == 4
           return (
             <div className="action-item" key={t.id}>
               <div>
-                <b>Your turn: {next}</b>
-                <div className="s">{listing(S, t.s).mat}, {f1(t.q)} t with {counterpartyName(S, t)}{sim ? ` (you act for them: ${stepActor(t, t.step + 1)} step)` : ''}</div>
+                <b>Your turn: {action.toLowerCase()}</b>
+                <div className="s">
+                  {listing(S, t.s).mat}, {f1(t.q)} t with {counterpartyName(S, t)}
+                  {t.pickupAt && n == 4 ? ` · pickup ${new Date(t.pickupAt).toLocaleString('en-NZ', { weekday: 'short', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' })}` : ''}
+                </div>
               </div>
-              <button className="btn" disabled={A.busy} onClick={() => A.advance(t.id)}>{next}</button>
+              {needsDetails
+                ? <button className="btn" onClick={() => A.go('Transactions')}>{action} →</button>
+                : <button className="btn" disabled={A.busy} onClick={() => A.advance(t.id)}>{action}</button>}
             </div>
           )
         })}
@@ -208,8 +215,9 @@ export default function Dashboard({ S, A }: { S: State; A: Actions }) {
             </span>
           </div>
         ) : (
+          <>
           <div className="glance">
-            {active.map(l => {
+            {glancePg.items.map(l => {
               const ms = all.filter((m): m is Scored => m.block === null && (supplier ? m.s.id : m.d.id) == l.id)
               const good = ms.filter(m => m.notes.length == 0).length
               const deals = S.T.filter(t => (t.s == l.id || t.d == l.id) && isOpen(t)).length
@@ -235,6 +243,8 @@ export default function Dashboard({ S, A }: { S: State; A: Actions }) {
               )
             })}
           </div>
+          <Pager {...glancePg} noun={supplier ? 'listings' : 'requests'} />
+          </>
         )}
       </div>
 
@@ -268,7 +278,7 @@ export default function Dashboard({ S, A }: { S: State; A: Actions }) {
           <summary>⏳ Waiting on others ({waiting.length})</summary>
           {waiting.map(t => (
             <div className="s" key={t.id}>
-              {listing(S, t.s).mat}, {f1(t.q)} t: waiting for {counterpartyName(S, t)} to do “{STEPS[t.step + 1]}”
+              {listing(S, t.s).mat}, {f1(t.q)} t: waiting for {counterpartyName(S, t)} to {STEP_ACTION[nextStep(t)].toLowerCase()}
             </div>
           ))}
         </details>
@@ -277,7 +287,7 @@ export default function Dashboard({ S, A }: { S: State; A: Actions }) {
       {reviewing && (
         <div className="modal-backdrop" onClick={() => setReviewKey(null)}>
           <div className="modal" role="dialog" aria-modal="true" aria-label="Review match" onClick={e => e.stopPropagation()}>
-            <MatchCard m={reviewing} S={S} A={A} onStarted={() => setReviewKey(null)} />
+            <MatchCard m={reviewing} S={S} A={A} />
             <button className="btn alt" onClick={() => setReviewKey(null)}>Close</button>
           </div>
         </div>

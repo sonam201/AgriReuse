@@ -4,11 +4,12 @@ import { useCallback, useEffect, useState, type Dispatch, type SetStateAction } 
 import type { Session } from '@supabase/supabase-js'
 import { CITY, DEFAULT_SETTINGS, STORAGE_KEY, TABS } from '@/lib/data'
 import * as db from '@/lib/db'
-import { addDays, allMatches, cleanMaterial, draftProblems, econ, hasRole, listing, listingToDraft, listingTypeFor, parse, today, type CoachTip } from '@/lib/logic'
+import { addDays, allMatches, cleanMaterial, draftProblems, econ, hasRole, listing, listingToDraft, listingTypeFor, nextStep, parse, today, type CoachTip } from '@/lib/logic'
 import { CATEGORIES } from '@/lib/compliance'
 import { configured, openedFromRecoveryLink, supabase } from '@/lib/supabase'
 import type { Demand, Draft, Profile as ProfileT, Role, State, Supply, Tab } from '@/lib/types'
 import AuthScreen from './AuthScreen'
+import Dialog, { type DialogRequest } from './Dialog'
 import NotificationBell from './NotificationBell'
 import ResetPassword from './ResetPassword'
 import CreateListing from './views/CreateListing'
@@ -18,11 +19,6 @@ import Marketplace from './views/Marketplace'
 import Matches from './views/Matches'
 import Profile from './views/Profile'
 import Transactions from './views/Transactions'
-
-const GUIDED_TEXT = {
-  Supply: 'I have 800 kg of overripe bananas in Pukekohe, available this Friday. They are unsellable, and I want to find a potential reuse option.',
-  Demand: 'I need 2 tonnes of plant material for composting near Hamilton next week.',
-}
 
 type Data = Awaited<ReturnType<typeof db.loadData>>
 type UI = Pick<State, 'tab' | 'q' | 'ft' | 'lim' | 'set'> & { view?: Role; inputMode?: 'chat' | 'form' }
@@ -100,7 +96,11 @@ function SignedIn({ userId }: { userId: string }) {
 
 export type Actions = ReturnType<typeof useActions>
 
-function useActions(S: State, setUI: (u: Partial<UI>) => void, refresh: () => Promise<void>, draft: Draft | null, setDraft: Dispatch<SetStateAction<Draft | null>>) {
+type Ask = (o: Omit<DialogRequest, 'resolve'>) => Promise<boolean>
+
+function useActions(S: State, setUI: (u: Partial<UI>) => void, refresh: () => Promise<void>, draft: Draft | null, setDraft: Dispatch<SetStateAction<Draft | null>>, ask: Ask) {
+  // A message with a single OK button (in-app, not the browser's alert).
+  const tell = (title: string, message?: string) => { void ask({ title, message, cancelLabel: null }) }
   const [busy, setBusy] = useState(false)
   const [extracting, setExtracting] = useState(false)
 
@@ -111,7 +111,7 @@ function useActions(S: State, setUI: (u: Partial<UI>) => void, refresh: () => Pr
       await fn()
       after?.()
     } catch (e) {
-      alert((e as Error).message)
+      tell('That didn’t work', (e as Error).message)
     } finally {
       await refresh()
       setBusy(false)
@@ -157,6 +157,7 @@ function useActions(S: State, setUI: (u: Partial<UI>) => void, refresh: () => Pr
   }
 
   return {
+    ask, // in-app confirmation dialog (used by views, e.g. Profile)
     busy,
     go: (tab: Tab) => setUI({ tab }),
     setFilter: (q: string, ft: State['ft']) => setUI({ q, ft, lim: 24 }),
@@ -178,14 +179,22 @@ function useActions(S: State, setUI: (u: Partial<UI>) => void, refresh: () => Pr
     },
 
     toggleArchive: (id: string) => run(() => db.setArchived(id, !listing(S, id).arch)),
-    deleteListing: (id: string) => {
-      if (!confirm('Delete this listing?\n\nAny open exchanges or offers on it are cancelled, and the other business is notified. This can’t be undone.')) return
-      run(async () => { if (await db.deleteListing(id) == 'retired') alert('Listing deleted. It stays in the other business’s exchange history only.') })
+    deleteListing: async (id: string) => {
+      if (!(await ask({
+        title: 'Delete this listing?',
+        message: 'Any open exchanges or requests on it are cancelled, and the other business is told. This can’t be undone.',
+        confirmLabel: 'Delete', danger: true,
+      }))) return
+      run(async () => { if (await db.deleteListing(id) == 'retired') tell('Listing deleted', 'It stays only in the other business’s exchange history.') })
     },
     // Profile → Your data. Shared exchanges and offers disappear for you only.
-    deleteMyData: (part: db.DataPart, what: string) => {
-      if (!confirm(`Delete ${what}?\n\nAnything still open is cancelled first and the other business is notified. Shared exchanges and offers are removed from your account only; the other business keeps its copy. This can’t be undone.`)) return
-      run(async () => { const n = await db.deleteMyData(part); alert(`Deleted ${n} ${what}.`) })
+    deleteMyData: async (part: db.DataPart, what: string) => {
+      if (!(await ask({
+        title: `Delete ${what}?`,
+        message: 'Anything still open is cancelled first and the other business is told. Shared deals and requests are removed from your account only; the other business keeps its copy. This can’t be undone.',
+        confirmLabel: 'Delete', danger: true,
+      }))) return
+      run(async () => { const n = await db.deleteMyData(part); tell(`Deleted ${n} ${what}`) })
     },
     openNotification: (id: number) => {
       const n = S.N.find(x => x.id == id)
@@ -193,22 +202,23 @@ function useActions(S: State, setUI: (u: Partial<UI>) => void, refresh: () => Pr
     },
     verify: (s: Supply, d: Demand) => run(async () => {
       await db.recordVerification(s.id, d.id)
-      await db.addNotification('Demo verification evidence recorded (simulated lab report)', 'Matches')
     }),
-    startTx: (key: string) => {
-      const m = allMatches(S).find(x => x.key == key)
-      if (!m || m.block !== null || m.g[0] != 'eligible') return alert('Blocked: verification or safety requirement not met.')
-      run(() => db.startTransaction(m.s.id, m.d.id, m.q), () => setUI({ tab: 'Transactions' }))
-    },
-    advance: (id: string) => {
+    // Pickup needs { pickupAt, note }; "received" needs { receivedQ }.
+    advance: (id: string, extra: { pickupAt?: string; note?: string; receivedQ?: number } = {}) => {
       const t = S.T.find(x => x.id == id)
       if (!t) return
-      // CO2e and each side's money result are estimated with the platform's logistics assumptions
-      // when the exchange completes, then stored so later setting changes don't rewrite history.
-      const e = t.step + 1 == 6 ? econ(S, listing(S, t.s) as Supply, listing(S, t.d) as Demand, t.q, 'receiver', t.price) : null
-      run(() => db.advanceTransaction(id, e && { co2: e.net, supplier: e.sup, receiver: e.rec }))
+      // On completion, CO2e and each side's money result are estimated from the tonnes actually
+      // received (platform logistics defaults) and stored, so the figures never change afterwards.
+      const q = t.receivedQ ?? t.q
+      const e = nextStep(t) == 6 ? econ(S, listing(S, t.s) as Supply, listing(S, t.d) as Demand, q, 'receiver', t.price) : null
+      run(() => db.advanceTransaction(id, e && { co2: e.net, supplier: e.sup, receiver: e.rec }, extra))
     },
-    cancel: (id: string, kind: 'cancelled' | 'dispute') => run(() => db.cancelTransaction(id, kind)),
+    cancel: async (id: string, kind: 'cancelled' | 'dispute') => {
+      const ok = await ask(kind == 'cancelled'
+        ? { title: 'Cancel this deal?', message: 'The deal stops here and the other business is told. Any reserved tonnes go back on the listing. This can’t be undone.', confirmLabel: 'Cancel deal', cancelLabel: 'Keep deal', danger: true }
+        : { title: 'Raise a dispute?', message: 'The deal is paused as disputed and the other business is told. This can’t be undone.', confirmLabel: 'Raise dispute', cancelLabel: 'Go back', danger: true })
+      if (ok) run(() => db.cancelTransaction(id, kind))
+    },
 
     extracting,
     understand,
@@ -252,43 +262,25 @@ function useActions(S: State, setUI: (u: Partial<UI>) => void, refresh: () => Pr
       setDraft(listingToDraft(l))
       setUI({ tab: 'Create Listing', view: l.type == 'Supply' ? 'Supplier' : 'Receiver' })
     },
-    guided: () => {
-      const type = listingTypeFor(S.view), d = parseForMe(GUIDED_TEXT[type])
-      if (type == 'Supply') {
-        Object.assign(d, {
-          disp: 120, chem: 'declared-none', category: 'fruit_veg', suburb: 'Pukekohe',
-          answers: { fruit_fly_zone: 'no', touched_meat: 'no', last_sprayed: 'never', condition: 'damaged', is_kiwifruit: 'no' },
-        })
-      }
-      d.source = undefined
-      setDraft(d)
-      setUI({ tab: 'Create Listing' })
-    },
     publish: () => {
       if (!draft) return
       const d = draft, problems = draftProblems(d)
-      if (problems.length) return alert('Please fix:\n• ' + problems.join('\n• '))
+      if (problems.length) return tell('Please fix these first', problems.join(' · '))
       run(async () => {
+        // Notifications are only for deal attempts, so publishing sends none.
         if (d.editId) await db.updateListing(d.editId, d, S.zone)
-        else {
-          const created = await db.createListing(d, S.zone)
-          // Tell the owners of listings this one matches (fictional businesses have no owner to tell).
-          const withNew: State = { ...S, L: [...S.L, created] }
-          const targets = allMatches(withNew)
-            .filter(m => m.block === null && (m.s.id == created.id || m.d.id == created.id))
-            .map(m => (m.s.id == created.id ? m.d : m.s))
-            .filter(o => o.ownerId)
-            .map(o => o.id)
-          const told = await db.notifyMatches(created.id, targets)
-          await db.addNotification(`Listing published; matching run${told ? ` (${told} business${told == 1 ? '' : 'es'} notified)` : ''}`, 'Matches')
-        }
+        else await db.createListing(d, S.zone)
       }, () => { setDraft(null); setUI({ tab: d.editId ? 'Marketplace' : 'Matches' }) })
     },
 
     // Applies a coach suggestion as a normal edit (re-confirming the seller declaration).
-    applyTip: (id: string, tip: CoachTip) => {
+    applyTip: async (id: string, tip: CoachTip) => {
       const l = listing(S, id)
-      if (!confirm(`${tip.label}?\n\nThis updates your listing.${l.type == 'Supply' ? ' You confirm the listing details are still true.' : ''}`)) return
+      if (!(await ask({
+        title: `${tip.label}?`,
+        message: `This updates your listing.${l.type == 'Supply' ? ' You confirm the listing details are still true.' : ''}`,
+        confirmLabel: 'Update listing',
+      }))) return
       const p = tip.patch, base = listingToDraft(l)
       const d: Draft = {
         ...base, declared: true,
@@ -305,18 +297,40 @@ function useActions(S: State, setUI: (u: Partial<UI>) => void, refresh: () => Pr
       await run(async () => { result = await db.sendOffer(supplyId, demandId, price, q, message) })
       return result as db.OfferResult | null
     },
-    respondOffer: (id: string, action: 'accept' | 'decline' | 'counter' | 'withdraw', price?: number) =>
+    respondOffer: (id: string, action: 'accept' | 'decline' | 'counter' | 'withdraw', price?: number, q?: number) =>
       run(async () => {
-        const r = await db.respondOffer(id, action, price)
-        if (r.note) alert(r.note)
+        const r = await db.respondOffer(id, action, price, q)
+        if (r.note) tell(r.note)
       }, () => { if (action == 'accept') setUI({ tab: 'Transactions' }) }),
+    // Buyer requesting a supply from the Marketplace without a posted request of their own.
+    requestWithoutListing: async (s: Supply, q: number, price: number, message: string) => {
+      let result: db.OfferResult | null = null
+      const loc = S.me.location && CITY[S.me.location] ? S.me.location : s.loc
+      await run(async () => {
+        const demandId = await db.createPrivateRequest(s, q, price, loc)
+        result = await db.sendOffer(s.id, demandId, price, q, message)
+      })
+      return result as db.OfferResult | null
+    },
   }
 }
 
 function Shell({ S, setUI, refresh, draft, setDraft }: {
   S: State; setUI: (u: Partial<UI>) => void; refresh: () => Promise<void>; draft: Draft | null; setDraft: Dispatch<SetStateAction<Draft | null>>
 }) {
-  const A = useActions(S, setUI, refresh, draft, setDraft)
+  // In-app dialog (replaces the browser's confirm/alert).
+  const [dialog, setDialog] = useState<DialogRequest | null>(null)
+  const ask = (o: Omit<DialogRequest, 'resolve'>) => new Promise<boolean>(resolve => setDialog({ ...o, resolve }))
+  const A = useActions(S, setUI, refresh, draft, setDraft, ask)
+  // Phones: the bottom tabs and header extras move into a hamburger menu.
+  const [menu, setMenu] = useState(false)
+  const goFromMenu = (t: Tab) => { setMenu(false); A.go(t) }
+  useEffect(() => {
+    if (!menu) return
+    const key = (e: KeyboardEvent) => { if (e.key == 'Escape') setMenu(false) }
+    document.addEventListener('keydown', key)
+    return () => document.removeEventListener('keydown', key)
+  }, [menu])
 
   const view = {
     'Create Listing': <CreateListing S={S} A={A} draft={draft} />,
@@ -328,30 +342,56 @@ function Shell({ S, setUI, refresh, draft, setDraft }: {
     Profile: <Profile S={S} A={A} />,
   }[S.tab]
 
+  const roleSwitch = S.me.canSupply && S.me.canReceive
+    ? <span className="switcher" role="group" aria-label="Acting as">
+        {(['Supplier', 'Receiver'] as const).map(r => (
+          <button key={r} className={S.view == r ? 'on' : ''} aria-pressed={S.view == r} onClick={() => A.setView(r)}>{r}</button>
+        ))}
+      </span>
+    : <span className="demo">{S.view}</span>
+
   return (
     <>
-      <header>
+      <header className="app-header">
         <b>🌱 AgriReuse</b>
-        <span className="demo">Payments simulated</span>
-        <span style={{ marginLeft: 'auto', fontSize: 14 }}>{S.me.businessName}</span>
-        {S.me.canSupply && S.me.canReceive
-          ? <span className="switcher" role="group" aria-label="Acting as">
-              {(['Supplier', 'Receiver'] as const).map(r => (
-                <button key={r} className={S.view == r ? 'on' : ''} aria-pressed={S.view == r} onClick={() => A.setView(r)}>{r}</button>
-              ))}
-            </span>
-          : <span className="demo">{S.view}</span>}
+        <span className="demo hide-sm">Payments simulated</span>
+        <span className="biz-name hide-sm">{S.me.businessName}</span>
+        <span className="hide-sm">{roleSwitch}</span>
         <NotificationBell S={S} A={A} />
-        <button className="btn alt" onClick={A.signOut}>Sign out</button>
+        <button className="btn alt hide-sm" onClick={A.signOut}>Sign out</button>
+        <button className="hamburger show-sm" aria-label={menu ? 'Close menu' : 'Open menu'} aria-expanded={menu} aria-controls="mobile-menu"
+          onClick={() => setMenu(!menu)}>{menu ? '✕' : '☰'}</button>
       </header>
+
+      {menu && (
+        <div className="menu-backdrop show-sm" onClick={() => setMenu(false)}>
+          <div id="mobile-menu" className="mobile-menu" role="navigation" aria-label="Main menu" onClick={e => e.stopPropagation()}>
+            <div className="menu-who">
+              <b>{S.me.businessName}</b>
+              {roleSwitch}
+            </div>
+            {TABS.map(t => (
+              <button key={t} className={'menu-item' + (S.tab == t ? ' on' : '')} aria-current={S.tab == t ? 'page' : undefined} onClick={() => goFromMenu(t)}>
+                {t}
+              </button>
+            ))}
+            <div className="menu-foot">
+              <span className="demo">Payments simulated</span>
+              <button className="btn alt" onClick={() => { setMenu(false); A.signOut() }}>Sign out</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <main>{view}</main>
-      <nav>
+      <nav className="tabbar hide-sm" aria-label="Main">
         {TABS.map(t => (
-          <button key={t} className={S.tab == t ? 'on' : ''} onClick={() => A.go(t)}>
+          <button key={t} className={S.tab == t ? 'on' : ''} aria-current={S.tab == t ? 'page' : undefined} onClick={() => A.go(t)}>
             {t}
           </button>
         ))}
       </nav>
+      {dialog && <Dialog req={dialog} onDone={() => setDialog(null)} />}
     </>
   )
 }

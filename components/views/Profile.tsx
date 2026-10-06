@@ -50,8 +50,12 @@ export default function Profile({ S, A }: { S: State; A: Actions }) {
               </div>
               {!on && (
                 <button className="btn" disabled={A.busy} onClick={() => {
-                  if (confirm(`Turn on ${verb.toLowerCase()}? Your account will be able to post ${role == 'Supplier' ? 'supply listings' : 'requests'} too. This can't be turned off later (you can always archive listings).`))
-                    A.enableRole(role)
+                  A.ask({
+                    title: `Turn on ${verb.toLowerCase()}?`,
+                    message: `Your account will be able to post ${role == 'Supplier' ? 'supply listings' : 'requests'} too. This can’t be turned off later (you can always archive listings).`,
+                    confirmLabel: `Turn on ${verb.toLowerCase()}`,
+                  }).then(ok => { if (ok)
+                    A.enableRole(role) })
                 }}>Also start {verb.toLowerCase()}</button>
               )}
             </div>

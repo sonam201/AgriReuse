@@ -1,7 +1,7 @@
 import { supabase } from './supabase'
 import { evaluate, type DemoZone } from './compliance'
 import { TYPICAL_ALTERNATIVE, TYPICAL_DISPOSAL, UNUSED_MAX_KM, chemFromAnswers, costOr, splitKeywords } from './logic'
-import type { Draft, Listing, Notification, Offer, Profile, Tab, Transaction } from './types'
+import type { Draft, Listing, Notification, Offer, Profile, Supply, Tab, Transaction } from './types'
 
 // Maps snake_case database rows to the app's types. Seeded rows have owner_id = null.
 type Row = Record<string, any>
@@ -12,18 +12,19 @@ const toListing = (r: Row): Listing => r.type == 'Supply'
       price: r.price, disp: r.disp, chem: r.chem, use: r.uses ?? [], from: r.from_date, to: r.to_date,
       done: r.done, res: r.res, arch: r.arch, moveR: r.move_r,
       category: r.category ?? null, suburb: r.suburb ?? null, answers: r.answers ?? {}, declaredAt: r.declared_at ?? null,
-      deletedAt: r.deleted_at ?? null,
+      deletedAt: r.deleted_at ?? null, private: r.private ?? false,
     }
   : {
       id: r.id, type: 'Demand', ownerId: r.owner_id, biz: r.biz, mat: r.mat, use1: r.use1, min: r.min_qty, max: r.max_qty,
       loc: r.loc, maxKm: r.max_km, maxPrice: r.max_price, alt: r.alt, from: r.from_date, to: r.to_date, arch: r.arch,
-      accepts: r.accepts ?? null, keywords: r.keywords ?? null, deletedAt: r.deleted_at ?? null,
+      accepts: r.accepts ?? null, keywords: r.keywords ?? null, deletedAt: r.deleted_at ?? null, private: r.private ?? false,
     }
 
 const toTransaction = (r: Row): Transaction => ({
   id: r.id, s: r.supply_id, d: r.demand_id, q: r.q, price: r.price, step: r.step,
   supplierId: r.supplier_id, receiverId: r.receiver_id, proposerId: r.proposer_id,
   log: r.log, co2: r.co2, cx: r.cx, supplierBenefit: r.supplier_benefit, receiverBenefit: r.receiver_benefit,
+  pickupAt: r.pickup_at ?? null, pickupNote: r.pickup_note ?? null, receivedQ: r.received_q ?? null,
 })
 
 const toOffer = (r: Row): Offer => ({
@@ -114,8 +115,6 @@ export type DataPart = 'listings' | 'exchanges' | 'offers' | 'notifications'
 export const deleteMyData = async (part: DataPart) =>
   check(await db().rpc('delete_my_data', { p_part: part })) as number
 
-export const addNotification = async (txt: string, tab: Tab) =>
-  check(await db().from('notifications').insert({ txt, tab }))
 
 export const markRead = async (id: number) =>
   check(await db().from('notifications').update({ read: true }).eq('id', id))
@@ -126,10 +125,16 @@ export const recordVerification = async (supplyId: string, demandId: string) =>
 export const startTransaction = async (supplyId: string, demandId: string, q: number) =>
   check(await db().rpc('start_transaction', { p_supply: supplyId, p_demand: demandId, p_q: q }))
 
-// co2 and both sides' money results are recorded when the final step completes.
-export const advanceTransaction = async (id: string, done: { co2: number; supplier: number; receiver: number } | null) =>
+// Moves a deal on one step. Pickup needs a date/time (+ note); "received" needs the tonnes;
+// completing records CO2e and each side's money result.
+export const advanceTransaction = async (
+  id: string,
+  done: { co2: number; supplier: number; receiver: number } | null,
+  extra: { pickupAt?: string; note?: string; receivedQ?: number } = {},
+) =>
   check(await db().rpc('advance_transaction', {
     p_id: id, p_co2: done?.co2 ?? null, p_supplier_benefit: done?.supplier ?? null, p_receiver_benefit: done?.receiver ?? null,
+    p_pickup_at: extra.pickupAt ?? null, p_note: extra.note ?? null, p_received_q: extra.receivedQ ?? null,
   }))
 
 export const extendListing = async (id: string, to: string) =>
@@ -163,13 +168,18 @@ export const enableRole = async (id: string, role: 'Supplier' | 'Receiver') =>
 export type OfferResult = { status: Offer['status']; offer_id?: string; transaction_id?: string; note?: string }
 export const sendOffer = async (supplyId: string, demandId: string, price: number, q: number, message: string) =>
   check(await db().rpc('send_offer', { p_supply: supplyId, p_demand: demandId, p_price: price, p_q: q, p_message: message })) as OfferResult
-export const respondOffer = async (id: string, action: 'accept' | 'decline' | 'counter' | 'withdraw', price?: number) =>
-  check(await db().rpc('respond_offer', { p_offer: id, p_action: action, p_price: price ?? null })) as OfferResult
+export const respondOffer = async (id: string, action: 'accept' | 'decline' | 'counter' | 'withdraw', price?: number, q?: number) =>
+  check(await db().rpc('respond_offer', { p_offer: id, p_action: action, p_price: price ?? null, p_q: q ?? null })) as OfferResult
 
-// Tells the owners of matching listings about a newly published listing (returns how many).
-export async function notifyMatches(listingId: string, targetIds: string[]) {
-  if (!targetIds.length) return 0
-  const { data, error } = await db().rpc('notify_matches', { p_listing: listingId, p_targets: targetIds.slice(0, 50) })
-  if (error) { console.warn('Match alerts unavailable:', error.message); return 0 } // e.g. migration not run yet
-  return data as number
+
+// A buyer requesting a supply from the Marketplace without a posted request: a private request
+// listing (never shown to others or matched) carries the deal. Returns its id.
+export async function createPrivateRequest(s: Supply, q: number, price: number, loc: string) {
+  const row = {
+    type: 'Demand', biz: '', private: true, mat: s.mat, keywords: [s.mat.toLowerCase()],
+    loc, from_date: s.from, to_date: s.to, use1: s.use[0] ?? 'composting',
+    min_qty: q, max_qty: q, max_km: UNUSED_MAX_KM, max_price: price, alt: TYPICAL_ALTERNATIVE,
+    accepts: s.category ? [s.category] : null,
+  }
+  return (check(await db().from('listings').insert(row).select('id').single()) as { id: string }).id
 }

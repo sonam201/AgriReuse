@@ -13,7 +13,9 @@ export const CITY: Record<string, [number, number]> = {
 // kg CO2e/t, kg/km/trip: ILLUSTRATIVE demo assumptions, not sourced
 export const EF = { disp: 450, alt: 60, truck: 0.9, proc: 20 }
 
-export const STEPS = ['Terms agreed by both parties', 'Demo payment held', 'Pickup scheduled', 'Pickup confirmed', 'Receipt confirmed', 'Demo payment released', 'Completed']
+// Deal steps after a request is approved (numbers kept on a 0..6 scale; 6 = completed).
+export const STEP_DONE: Record<number, string> = { 0: 'Terms agreed', 2: 'Pickup arranged', 4: 'Received', 6: 'Completed' }
+export const STEP_ACTION: Record<number, string> = { 0: 'Agree terms', 2: 'Arrange pickup', 4: 'Confirm received', 6: 'Mark completed' }
 
 export const TABS: Tab[] = ['Dashboard', 'Create Listing', 'Marketplace', 'Matches', 'Transactions', 'Impact', 'Profile']
 

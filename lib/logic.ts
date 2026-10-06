@@ -9,7 +9,7 @@ export const avail = (l: Supply) => +(l.qty - l.done - l.res).toFixed(3)
 export const listing = (S: State, id: string) => S.L.find(l => l.id == id) as Listing
 export const supplies = (S: State) => S.L.filter((l): l is Supply => l.type == 'Supply')
 export const demands = (S: State) => S.L.filter((l): l is Demand => l.type == 'Demand')
-export const businessCount = (S: State) => new Set(S.L.filter(l => !l.deletedAt).map(l => l.biz)).size
+export const businessCount = (S: State) => new Set(S.L.filter(l => !l.deletedAt && !l.private).map(l => l.biz)).size
 
 // Straight-line (haversine) distance between cities, scaled by the road multiplier.
 // Infinity for a town we can't place, so callers treat it as out of range instead of crashing.
@@ -80,6 +80,7 @@ export function sharedKeywords(s: Supply, d: Demand) {
 // never exclude: they rank the match and show as ⚠ notes.
 export function match(S: State, s: Supply, d: Demand): Match | null {
   if (s.arch || d.arch) return null
+  if (s.private || d.private) return null // one-off request listings only carry their own request
   if (s.ownerId && s.ownerId == d.ownerId) return null // an account can't trade with itself
   // Buyers whose use isn't allowed are hidden (a fully blocked listing still shows as "Not allowed").
   const comp = complianceOf(S, s)
@@ -146,14 +147,16 @@ export const isMine = (S: State, l: Listing) => l.ownerId == S.me.id
 export const isParty = (S: State, t: Transaction) => [t.supplierId, t.receiverId, t.proposerId].includes(S.me.id)
 
 // Who performs the next step: 0 (terms agreed) is the party that did not propose.
+// The next step of a deal: 0 terms agreed (older proposals) → 2 pickup arranged → 4 received → 6 completed.
+export const nextStep = (t: Transaction) => t.step < 0 ? 0 : t.step % 2 ? t.step + 1 : t.step + 2
 export function stepActor(t: Transaction, next: number): 'supplier' | 'receiver' {
   if (next == 0) return t.proposerId != null && t.proposerId == t.supplierId ? 'receiver' : 'supplier'
-  return [1, 4, 5].includes(next) ? 'receiver' : 'supplier'
+  return next == 4 ? 'receiver' : 'supplier' // 2 arrange pickup, 6 complete: seller · 4 confirm received: buyer
 }
 
 // 'me' = my turn; 'simulated' = the actor is a fictional seeded business, so I act for them; 'waiting' = other user's turn.
 export function turn(S: State, t: Transaction): 'me' | 'simulated' | 'waiting' {
-  const who = stepActor(t, t.step + 1), id = who == 'supplier' ? t.supplierId : t.receiverId
+  const who = stepActor(t, nextStep(t)), id = who == 'supplier' ? t.supplierId : t.receiverId
   return id == S.me.id ? 'me' : id == null ? 'simulated' : 'waiting'
 }
 
@@ -271,7 +274,7 @@ export function weekly(txs: Transaction[], S: State, weeks = 8) {
 // My active listings ending within `days` days (or already ended) that still have something open.
 export function endingSoon(S: State, days = 7) {
   return S.L
-    .filter(l => l.ownerId == S.me.id && !l.arch && (l.type == 'Demand' || avail(l) > 0) && daysUntil(l.to) <= days)
+    .filter(l => l.ownerId == S.me.id && !l.arch && !l.private && !l.deletedAt && (l.type == 'Demand' || avail(l) > 0) && daysUntil(l.to) <= days)
     .sort((a, b) => a.to.localeCompare(b.to))
 }
 
@@ -389,14 +392,6 @@ export function coach(S: State, l: Listing): Coach {
   }
 }
 
-// An offer can bridge price, amount or transport cost, but the database won't accept one that
-// changes the use, the dates or a kind of material the buyer doesn't take.
-export function canOffer(m: Extract<Match, { block: null }>) {
-  const needs = m.s.price > m.d.maxPrice || m.q < m.d.min || m.e.rec < 0
-  const kindOk = !m.d.accepts?.length || !m.s.category || m.d.accepts.includes(m.s.category)
-  const datesOk = !(m.s.from > m.d.to || m.s.to < m.d.from)
-  return needs && kindOk && datesOk && m.s.use.includes(m.d.use1)
-}
 
 // ---- form defaults ----
 // Typical costs used when the seller/buyer leaves them blank (illustrative, for the $ estimates only).

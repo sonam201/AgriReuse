@@ -14,6 +14,7 @@ export interface Supply {
   qty: number; loc: string; price: number; disp: number; chem: string; use: string[]
   from: string; to: string; done: number; res: number; arch: boolean; moveR?: boolean
   deletedAt?: string | null // retired: deleted by its owner but kept for others' exchange history
+  private?: boolean
   // Compliance Check (null/empty on older and seeded listings).
   category?: string | null; suburb?: string | null; answers?: Record<string, string>; declaredAt?: string | null
 }
@@ -24,6 +25,7 @@ export interface Demand {
   accepts?: string[] | null // categories the buyer takes; empty/null = any kind
   keywords?: string[] | null // materials the buyer wants, e.g. ['banana', 'apple pomace']
   from: string; to: string; arch: boolean
+  private?: boolean // created for a one-off Marketplace request; never shown to others or matched
   deletedAt?: string | null
 }
 
@@ -39,6 +41,7 @@ export interface Transaction {
   log: [string, string][]; co2: number | null; cx?: 'cancelled' | 'dispute' | null
   // Money result for each side, stored when the exchange completes (null for older/seeded rows).
   supplierBenefit: number | null; receiverBenefit: number | null
+  pickupAt?: string | null; pickupNote?: string | null; receivedQ?: number | null
 }
 
 export interface Notification { id: number; txt: string; read: boolean; tab: Tab }
