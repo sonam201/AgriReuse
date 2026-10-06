@@ -10,7 +10,7 @@ export default function Transactions({ S, A }: { S: State; A: Actions }) {
   return (
     <>
       <h2>Transactions</h2>
-      <div className="warn">Demo only: no real funds are collected, held, or released.</div>
+      <div className="warn">Payments are simulated: no real money is collected, held or released.</div>
       <br />
       <OffersPanel S={S} A={A} />
       <br />

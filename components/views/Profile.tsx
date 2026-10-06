@@ -4,13 +4,12 @@ import { useState, type FormEvent } from 'react'
 import { CITY } from '@/lib/data'
 import type { State } from '@/lib/types'
 import type { Actions } from '../App'
-import { DemoZoneSwitch } from '../Compliance'
 
 export default function Profile({ S, A }: { S: State; A: Actions }) {
   const [name, setName] = useState(S.me.businessName)
   const [loc, setLoc] = useState(S.me.location ?? '')
   const [saved, setSaved] = useState(false)
-  const listings = S.L.filter(l => l.ownerId == S.me.id)
+  const listings = S.L.filter(l => l.ownerId == S.me.id && !l.deletedAt)
   const changed = name.trim() != S.me.businessName || loc != (S.me.location ?? '')
 
   async function save(e: FormEvent) {
@@ -61,10 +60,30 @@ export default function Profile({ S, A }: { S: State; A: Actions }) {
       </div>
 
       <div className="card s">
-        Synthetic demo platform: no real accreditation. Contact happens in-app. Notifications are under the 🔔 bell at the top.
+        Contact happens in-app. Notifications are under the 🔔 bell at the top.
       </div>
-      <h3 className="t">Demo controls</h3>
-      <DemoZoneSwitch S={S} A={A} />
+      <div className="card">
+        <h3>Your data</h3>
+        <p className="s">
+          Delete your history one part at a time. Anything still open is cancelled first and the other business is told.
+          Exchanges and offers are shared, so deleting removes them from your account only; the other business keeps its copy.
+        </p>
+        {([
+          ['listings', 'your listings', listings.length, 'Supply listings and requests you posted'],
+          ['exchanges', 'your exchange history', S.T.filter(t => [t.supplierId, t.receiverId, t.proposerId].includes(S.me.id)).length, 'Open exchanges are cancelled; finished ones are removed from your account'],
+          ['offers', 'your offers', S.O.length, 'Open offers are withdrawn or declined'],
+          ['notifications', 'your notifications', S.N.length, 'Everything under the 🔔 bell'],
+        ] as const).map(([part, what, count, note]) => (
+          <div className="action-item" key={part}>
+            <div>
+              <b>{what.replace('your ', '').replace(/^./, c => c.toUpperCase())}</b> <span className="s">· {count}</span>
+              <div className="s">{note}</div>
+            </div>
+            <button className="btn alt danger" disabled={A.busy || count == 0} onClick={() => A.deleteMyData(part, what)}>Delete</button>
+          </div>
+        ))}
+      </div>
+
       <button className="btn alt" onClick={A.signOut}>Sign out</button>
     </>
   )

@@ -117,7 +117,7 @@ export default function AuthScreen() {
     <>
       <header>
         <b>🌱 AgriReuse</b>
-        <span className="demo">Demo: synthetic data and simulated transactions</span>
+        <span className="demo">Payments simulated</span>
         <span className="header-actions"><Link className="btn alt" href="/">← Home</Link></span>
       </header>
       <main style={{ maxWidth: 480 }}>

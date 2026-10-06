@@ -36,7 +36,7 @@ export default function Landing() {
       <AuthRedirect />
       <header>
         <b>🌱 AgriReuse</b>
-        <span className="demo">Demo version</span>
+        <span className="demo">Payments simulated</span>
         <span className="header-actions">
           <Link className="btn alt" href="/app?mode=in">Sign in</Link>
           <Link className="btn" href="/app?mode=up">Sign up</Link>
@@ -110,7 +110,7 @@ export default function Landing() {
 
       <footer>
         <div className="warn">
-          This is a demo version. It uses sample data, and payments are simulated. Safety checks are guidance only, not legal advice.
+          Payments are simulated: no real money is collected, held or released.
         </div>
       </footer>
     </div>

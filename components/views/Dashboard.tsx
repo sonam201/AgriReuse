@@ -1,37 +1,97 @@
 'use client'
 
 import { useEffect, useState } from 'react'
+import { CATEGORIES, USE_LABELS } from '@/lib/compliance'
 import { STEPS } from '@/lib/data'
 import {
-  avail, counterpartyName, daysUntil, endingSoon, f1, fmtKm, isOpen, kmNotDriven, listing, matchReasons, money,
-  myBenefit, myMatches, myTransactions, sideTransactions, stepActor, turn, txCo2, weekly, wheelieBins,
+  allMatches, avail, categoryOf, complianceOf, counterpartyName, daysUntil, endingSoon, f1, hasOpenExchange, isOpen,
+  keywordTokens, kmNotDriven, listing, money, myBenefit, myMatches, myTransactions, sideTransactions, stepActor, turn,
+  txCo2, weekly, wheelieBins,
 } from '@/lib/logic'
-import type { State, Tab } from '@/lib/types'
+import type { Demand, Listing, State, Supply } from '@/lib/types'
 import type { Actions } from '../App'
+import { ComplianceBadge } from '../Compliance'
 import WeeklyChart from '../WeeklyChart'
 import { MatchCard, type Scored } from './Matches'
 
+const catName = (id: string | null | undefined) => CATEGORIES.find(c => c.id == id)?.label ?? 'other'
+const median = (xs: number[]) => { const s = [...xs].sort((a, b) => a - b); return s.length ? s[Math.floor((s.length - 1) / 2)] : 0 }
+const top = (xs: string[], n = 3) =>
+  Object.entries(xs.reduce<Record<string, number>>((a, x) => ({ ...a, [x]: (a[x] ?? 0) + 1 }), {}))
+    .sort((a, b) => b[1] - a[1]).slice(0, n).map(([k, c]) => ({ k, c }))
+const $range = (xs: number[]) => xs.length ? (Math.min(...xs) == Math.max(...xs) ? `$${Math.min(...xs)}/t` : `$${Math.min(...xs)}–$${Math.max(...xs)}/t`) : '—'
+
+// Live price and demand picture for the kinds of material I list (or ask for).
+function MarketInsight({ S, mine }: { S: State; mine: Listing[] }) {
+  const supplier = S.view == 'Supplier'
+  const others = S.L.filter(l => l.ownerId != S.me.id && !l.arch && !l.deletedAt)
+  if (supplier) {
+    const cats = new Set(mine.map(l => categoryOf(l as Supply)).filter(Boolean) as string[])
+    const words = new Set(mine.flatMap(l => keywordTokens(l.mat)))
+    const buyers = (others.filter(l => l.type == 'Demand') as Demand[]).filter(d =>
+      !mine.length || !d.accepts?.length || d.accepts.some(c => cats.has(c)) ||
+      keywordTokens([d.mat, ...(d.keywords ?? [])].join(' ')).some(w => words.has(w)))
+    const prices = buyers.map(d => d.maxPrice)
+    return (
+      <div className="card">
+        <h3>💲 What buyers are paying</h3>
+        {buyers.length == 0 ? <p className="s">No buyer requests for your kinds of material yet.</p> : (
+          <div className="insight">
+            <div><span className="big">{buyers.length}</span><span className="s">buyer request{buyers.length == 1 ? '' : 's'} {mine.length ? 'for your kinds of material' : 'on AgriReuse'}</span></div>
+            <div><span className="big">{$range(prices)}</span><span className="s">their budgets (typical ${median(prices)}/t)</span></div>
+            <div><span className="big">{buyers.filter(d => d.maxPrice == 0).length}</span><span className="s">only want it free</span></div>
+            <div className="s">Most want it for: {top(buyers.map(d => USE_LABELS[d.use1] ?? d.use1)).map(t => `${t.k} (${t.c})`).join(', ')}</div>
+          </div>
+        )}
+      </div>
+    )
+  }
+  const anyKind = !mine.length || mine.some(l => !(l as Demand).accepts?.length)
+  const cats = new Set(mine.flatMap(l => (l as Demand).accepts ?? []))
+  const words = new Set(mine.flatMap(l => keywordTokens([l.mat, ...((l as Demand).keywords ?? [])].join(' '))))
+  const sellers = (others.filter(l => l.type == 'Supply') as Supply[]).filter(s =>
+    avail(s) > 0 && complianceOf(S, s).level != 'blocked' &&
+    (anyKind || cats.has(categoryOf(s) ?? '') || keywordTokens(s.mat).some(w => words.has(w))))
+  const paid = sellers.filter(s => s.price > 0).map(s => s.price)
+  return (
+    <div className="card">
+      <h3>💲 What sellers are offering</h3>
+      {sellers.length == 0 ? <p className="s">No supplies of the kinds you want yet.</p> : (
+        <div className="insight">
+          <div><span className="big">{sellers.length}</span><span className="s">suppl{sellers.length == 1 ? 'y' : 'ies'} {mine.length ? 'of the kinds you want' : 'on AgriReuse'}</span></div>
+          <div><span className="big">{f1(sellers.reduce((a, s) => a + avail(s), 0))} t</span><span className="s">available in total</span></div>
+          <div><span className="big">{sellers.filter(s => s.price == 0).length}</span><span className="s">offered free · paid ones {$range(paid)}</span></div>
+          <div className="s">Most common: {top(sellers.map(s => catName(categoryOf(s)))).map(t => `${t.k} (${t.c})`).join(', ')}</div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function Dashboard({ S, A }: { S: State; A: Actions }) {
   const [reviewKey, setReviewKey] = useState<string | null>(null)
+
   const supplier = S.view == 'Supplier'
-  // Numbers and checklist follow the side being viewed; "your turn" items cover both sides.
-  const myListings = S.L.filter(l => l.ownerId == S.me.id && l.type == (supplier ? 'Supply' : 'Demand'))
+  // Listings, numbers and market picture follow the side being viewed; to-dos cover both sides.
+  const myListings = S.L.filter(l => l.ownerId == S.me.id && !l.deletedAt && l.type == (supplier ? 'Supply' : 'Demand'))
   const active = myListings.filter(l => !l.arch)
   const txs = sideTransactions(S)
   const allOpen = myTransactions(S).filter(isOpen)
   const open = txs.filter(isOpen)
   const done = txs.filter(t => t.step == 6)
 
-  const scored = myMatches(S).filter((m): m is Scored => m.block === null).sort((x, y) => y.score - x.score)
-  const eligible = scored.filter(m => m.g[0] == 'eligible')
-  const restricted = scored.filter(m => m.g[0] == 'restricted')
+  const all = allMatches(S)
+  const scored = myMatches(S).filter((m): m is Scored => m.block === null)
+  const restricted = scored.filter(m => m.g[0] == 'restricted').sort((x, y) => y.score - x.score)
   const inProgress = new Set(open.map(t => t.s + t.d))
-  const newMatches = eligible.filter(m => !inProgress.has(m.key))
+  const newMatches = scored.filter(m => !inProgress.has(m.key))
   const reviewing = scored.find(m => m.key == reviewKey)
 
+  const offersToAnswer = S.O.filter(o => o.to == S.me.id && o.status == 'pending')
   const myTurn = allOpen.filter(t => turn(S, t) != 'waiting')
   const waiting = allOpen.filter(t => turn(S, t) == 'waiting')
   const ending = endingSoon(S)
+  const todo = offersToAnswer.length + myTurn.length + restricted.length + ending.length
 
   const tonnes = done.reduce((a, t) => a + t.q, 0)
   const benefit = done.reduce((a, t) => a + myBenefit(S, t), 0)
@@ -46,32 +106,17 @@ export default function Dashboard({ S, A }: { S: State; A: Actions }) {
 
   const stats: [string, string | number][] = supplier
     ? [
-        ['Active listings', active.length],
-        ['Tonnes available to reuse', f1(active.reduce((a, l) => a + (l.type == 'Supply' ? avail(l) : 0), 0))],
         ['Tonnes diverted from waste', f1(tonnes)],
         ['Disposal avoided + sales (est.)', money(benefit)],
         ['CO₂e saved (kg, est.)', f1(co2)],
-        ['Open exchanges', open.length],
+        ['Completed exchanges', done.length],
       ]
     : [
-        ['Open requests', active.length],
-        ['Tonnes requested', f1(active.reduce((a, l) => a + (l.type == 'Demand' ? l.max : 0), 0))],
         ['Tonnes sourced', f1(tonnes)],
         ['Saved vs. alternatives (est.)', money(benefit)],
         ['CO₂e saved (kg, est.)', f1(co2)],
-        ['Open exchanges', open.length],
+        ['Completed exchanges', done.length],
       ]
-
-  // Getting-started checklist, hidden once every step is done.
-  const checklist: [string, boolean, Tab, string][] = [
-    [supplier ? 'Post your first listing' : 'Post your first request', myListings.length > 0, 'Create Listing', supplier ? 'List a material' : 'Request a material'],
-    ['Get matched', eligible.length + restricted.length > 0 || txs.length > 0, 'Matches', 'See matches'],
-    ['Start an exchange', txs.length > 0, 'Matches', 'Choose a match'],
-    ['Complete your first exchange', done.length > 0, 'Transactions', 'Open transactions'],
-  ]
-  const nextStep = checklist.findIndex(c => !c[1])
-  const offersToAnswer = S.O.filter(o => o.to == S.me.id && o.status == 'pending')
-  const todo = myTurn.length + restricted.length + ending.length + offersToAnswer.length
 
   return (
     <>
@@ -81,25 +126,10 @@ export default function Dashboard({ S, A }: { S: State; A: Actions }) {
         {S.me.location ? ` · ${S.me.location}` : ''}
       </p>
 
-      {nextStep != -1 && (
-        <div className="card">
-          <h3>Getting started</h3>
-          <ol className="checklist">
-            {checklist.map(([label, ok, tab, cta], i) => (
-              <li key={label} className={ok ? 'done' : i == nextStep ? 'next' : ''}>
-                <span className="check">{ok ? '✔' : i + 1}</span>
-                <span>{label}</span>
-                {i == nextStep && <button className="btn" onClick={() => A.go(tab)}>{cta}</button>}
-              </li>
-            ))}
-          </ol>
-          {nextStep == 0 && <p className="s">Short on time? <button className="btn alt" onClick={A.guided}>▶ Try guided demo</button></p>}
-        </div>
-      )}
-
+      {/* 1. Waiting on you: things that only move when you click */}
       <div className="card">
-        <h3>Needs your action {todo > 0 && <span className="tag restricted">{todo}</span>}</h3>
-        {todo + newMatches.length == 0 && <p className="s">Nothing needs you right now ✓</p>}
+        <h3>Waiting on you {todo > 0 && <span className="tag restricted">{todo}</span>}</h3>
+        {todo == 0 && <p className="s">Nothing is waiting on you right now ✓</p>}
 
         {offersToAnswer.map(o => {
           const s = S.L.find(l => l.id == o.s), d = S.L.find(l => l.id == o.d)
@@ -129,6 +159,16 @@ export default function Dashboard({ S, A }: { S: State; A: Actions }) {
           )
         })}
 
+        {restricted.slice(0, 3).map(m => (
+          <div className="action-item" key={m.key}>
+            <div>
+              <b>Verification needed</b>
+              <div className="s">{m.s.mat} · {m.s.biz} → {m.d.biz}</div>
+            </div>
+            <button className="btn alt" onClick={() => setReviewKey(m.key)}>Review</button>
+          </div>
+        ))}
+
         {ending.map(l => {
           const days = daysUntil(l.to), left = l.type == 'Supply' ? `${f1(avail(l))} t still unmatched` : 'request still open'
           return (
@@ -145,74 +185,93 @@ export default function Dashboard({ S, A }: { S: State; A: Actions }) {
           )
         })}
 
-        {restricted.slice(0, 3).map(m => (
-          <div className="action-item" key={m.key}>
-            <div>
-              <b>Verification needed</b>
-              <div className="s">{m.s.mat} · {m.s.biz} → {m.d.biz} · score {m.score}/100</div>
-            </div>
-            <button className="btn alt" onClick={() => setReviewKey(m.key)}>Review</button>
-          </div>
-        ))}
-
-        {newMatches.length > 0 && <p className="s" style={{ margin: '12px 0 0' }}>Top new matches ({newMatches.length})</p>}
-        {newMatches.slice(0, 3).map(m => (
-          <div className="action-item" key={m.key}>
-            <div>
-              <b>New match · score {m.score}/100 · {supplier ? 'you gain' : 'you save'} {money(supplier ? m.e.sup : m.e.rec)}</b>
-              <div className="s">
-                {supplier ? `${m.d.biz} · ${m.d.loc} can reuse your ${m.s.mat}` : `${m.s.mat} from ${m.s.biz} · ${m.s.loc}`} · {f1(m.q)} t · {fmtKm(m.e.dist)}
-              </div>
-              <div className="s" style={{ color: 'var(--ink)' }}>Why: {matchReasons(m).join(' · ')}</div>
-            </div>
-            <button className="btn" onClick={() => setReviewKey(m.key)}>Review</button>
-          </div>
-        ))}
-
-        {(restricted.length > 3 || newMatches.length > 3) && (
-          <p className="s"><button className="btn alt" onClick={() => A.go('Matches')}>See all {eligible.length + restricted.length} matches</button></p>
+        {newMatches.length > 0 && (
+          <p className="new-matches">
+            🤝 <b>{newMatches.length} match{newMatches.length == 1 ? '' : 'es'}</b> for your {supplier ? 'listings' : 'requests'}{' '}
+            <button className="linkish" onClick={() => A.go('Matches')}>See matches →</button>
+          </p>
         )}
       </div>
 
-      {/* Numbers appear once there's something to count, so new users focus on the checklist. */}
+      {/* 2. Your listings at a glance */}
+      <div className="card">
+        <h3>Your {supplier ? 'listings' : 'requests'} at a glance</h3>
+        {active.length == 0 ? (
+          <div className="action-item">
+            <div>
+              <b>{supplier ? 'You have nothing listed right now.' : 'You have no open requests.'}</b>
+              <div className="s">{supplier ? 'List surplus or waste and we’ll find businesses that can reuse it.' : 'Say what material you need and we’ll show you who has it.'}</div>
+            </div>
+            <span>
+              <button className="btn" onClick={() => A.go('Create Listing')}>{supplier ? 'List a material' : 'Request a material'}</button>{' '}
+              <button className="btn alt" onClick={() => A.go('Marketplace')}>Browse the marketplace</button>
+            </span>
+          </div>
+        ) : (
+          <div className="glance">
+            {active.map(l => {
+              const ms = all.filter((m): m is Scored => m.block === null && (supplier ? m.s.id : m.d.id) == l.id)
+              const good = ms.filter(m => m.notes.length == 0).length
+              const deals = S.T.filter(t => (t.s == l.id || t.d == l.id) && isOpen(t)).length
+              const days = daysUntil(l.to)
+              return (
+                <div className="glance-row" key={l.id}>
+                  <div className="glance-main">
+                    <b>{l.mat}</b> {l.type == 'Supply' && <ComplianceBadge level={complianceOf(S, l).level} />}
+                    <div className="s">
+                      {l.type == 'Supply' ? `${f1(avail(l))} of ${l.qty} t left · ${l.price == 0 ? 'free' : `$${l.price}/t`}` : `wants ${l.min}–${l.max} t · up to $${l.maxPrice}/t`}
+                      {' · '}{days < 0 ? 'ended' : days == 0 ? 'ends today' : `ends in ${days} day${days == 1 ? '' : 's'}`}
+                    </div>
+                  </div>
+                  <div className="glance-figs">
+                    <span><b>{ms.length}</b> match{ms.length == 1 ? '' : 'es'}{ms.length > good ? ` (${good} clean)` : ''}</span>
+                    <span><b>{deals}</b> deal{deals == 1 ? '' : 's'} in progress</span>
+                  </div>
+                  <span className="glance-actions">
+                    <button className="btn" onClick={() => A.go('Matches')}>See matches</button>{' '}
+                    <button className="btn alt" disabled={A.busy || hasOpenExchange(S, l.id)} onClick={() => A.startEdit(l.id)}>Edit</button>
+                  </span>
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* 3. Market picture for my kinds of material */}
+      <MarketInsight S={S} mine={active} />
+
+      {/* 4. Your results and CO2e graph: always shown once you have a listing (motivation) */}
       {myListings.length > 0 && (
-        <>
+        <section aria-label="Your results">
+          <h3 className="t">Your results so far</h3>
           <div className="grid">
             {stats.map(([label, value]) => (
               <div className="card" key={label}><div className="big">{value}</div><div className="s">{label}</div></div>
             ))}
           </div>
           {done.length > 0 && (
-            <div className="card">
-              <div className="equiv">
-                <span>🚗 ≈ <b>{kmNotDriven(co2).toLocaleString('en-NZ')} km</b> of driving avoided</span>
-                <span>🗑️ ≈ <b>{wheelieBins(tonnes).toLocaleString('en-NZ')} wheelie bins</b> kept out of landfill</span>
-              </div>
-              <p className="s" style={{ margin: '6px 0 0' }}>Rough everyday equivalents (average car ≈ 0.2 kg CO₂e/km; one 240 L bin ≈ 0.1 t). Illustrative only.</p>
-            </div>
+            <p className="s equiv-caption">
+              That’s about 🚗 <b>{kmNotDriven(co2).toLocaleString('en-NZ')} km</b> of driving avoided and
+              🗑️ <b>{wheelieBins(tonnes).toLocaleString('en-NZ')} wheelie bins</b> kept out of landfill (rough equivalents).
+            </p>
           )}
           <div className="card">
-            <WeeklyChart buckets={weekly(txs, S)} title="Your CO₂e saved per week" />
+            <WeeklyChart buckets={weekly(txs, S)} title="🌱 Your CO₂e saved per week" />
           </div>
-        </>
+        </section>
       )}
 
+      {/* 5. Waiting on others: folded away */}
       {waiting.length > 0 && (
-        <div className="card">
-          <h3>Waiting on others</h3>
+        <details className="card fold">
+          <summary>⏳ Waiting on others ({waiting.length})</summary>
           {waiting.map(t => (
             <div className="s" key={t.id}>
               {listing(S, t.s).mat}, {f1(t.q)} t: waiting for {counterpartyName(S, t)} to do “{STEPS[t.step + 1]}”
             </div>
           ))}
-        </div>
-      )}
-
-      {!(S.me.canSupply && S.me.canReceive) && (
-        <div className="card s">
-          {supplier ? 'Also need compost, feed or other material?' : 'Also have surplus or waste to pass on?'}{' '}
-          <button className="btn alt" onClick={() => A.go('Profile')}>{supplier ? 'Start buying too' : 'Start selling too'}</button>
-        </div>
+        </details>
       )}
 
       {reviewing && (

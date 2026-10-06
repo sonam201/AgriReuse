@@ -76,20 +76,3 @@ export function ComplianceFields({ S, A, d }: { S: State; A: Actions; d: Draft }
   )
 }
 
-// Demo control: anyone signed in can switch the demo fruit fly zone; every viewer updates live.
-export function DemoZoneSwitch({ S, A }: { S: State; A: Actions }) {
-  const on = S.zone.active
-  return (
-    <div className={'card demo-zone' + (on ? ' on' : '')}>
-      <div>
-        <b>{on ? '🔴 Demo fruit fly zone ACTIVE' : 'Demo fruit fly zone: off'}</b>
-        <div className="s">
-          Suburbs: {S.zone.suburbs.join(', ')}. When on, listings from these suburbs become 🔴 Not allowed and can’t be exchanged.
-        </div>
-      </div>
-      <button className={on ? 'btn alt' : 'btn'} disabled={A.busy} onClick={() => A.setDemoZone(!on)}>
-        {on ? 'Turn off' : 'Turn on'}
-      </button>
-    </div>
-  )
-}

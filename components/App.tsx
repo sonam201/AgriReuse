@@ -2,11 +2,12 @@
 
 import { useCallback, useEffect, useState, type Dispatch, type SetStateAction } from 'react'
 import type { Session } from '@supabase/supabase-js'
-import { DEFAULT_SETTINGS, STORAGE_KEY, TABS } from '@/lib/data'
+import { CITY, DEFAULT_SETTINGS, STORAGE_KEY, TABS } from '@/lib/data'
 import * as db from '@/lib/db'
-import { addDays, allMatches, draftProblems, econ, hasRole, listing, listingToDraft, listingTypeFor, parse, today, type CoachTip } from '@/lib/logic'
+import { addDays, allMatches, cleanMaterial, draftProblems, econ, hasRole, listing, listingToDraft, listingTypeFor, parse, today, type CoachTip } from '@/lib/logic'
+import { CATEGORIES } from '@/lib/compliance'
 import { configured, openedFromRecoveryLink, supabase } from '@/lib/supabase'
-import type { Demand, Draft, Profile as ProfileT, Role, Settings, State, Supply, Tab } from '@/lib/types'
+import type { Demand, Draft, Profile as ProfileT, Role, State, Supply, Tab } from '@/lib/types'
 import AuthScreen from './AuthScreen'
 import NotificationBell from './NotificationBell'
 import ResetPassword from './ResetPassword'
@@ -51,8 +52,9 @@ function AuthGate() {
 function loadUI(): UI {
   try {
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null')
-    // Every sign-in opens on the Dashboard; filters and logistics assumptions are remembered.
-    if (saved) return { ...saved, tab: 'Dashboard', set: { ...DEFAULT_SETTINGS, ...saved.set } }
+    // Every sign-in opens on the Dashboard; filters are remembered. Logistics assumptions are
+    // fixed platform defaults (any values saved by the old settings panel are ignored).
+    if (saved) return { ...saved, tab: 'Dashboard', set: DEFAULT_SETTINGS }
   } catch {}
   return { tab: 'Dashboard', set: DEFAULT_SETTINGS }
 }
@@ -157,7 +159,6 @@ function useActions(S: State, setUI: (u: Partial<UI>) => void, refresh: () => Pr
   return {
     busy,
     go: (tab: Tab) => setUI({ tab }),
-    setSetting: <K extends keyof Settings>(k: K, v: Settings[K]) => setUI({ set: { ...S.set, [k]: v } }),
     setFilter: (q: string, ft: State['ft']) => setUI({ q, ft, lim: 24 }),
     showMore: (lim: number) => setUI({ lim }),
     signOut: () => supabase!.auth.signOut(),
@@ -177,7 +178,15 @@ function useActions(S: State, setUI: (u: Partial<UI>) => void, refresh: () => Pr
     },
 
     toggleArchive: (id: string) => run(() => db.setArchived(id, !listing(S, id).arch)),
-    deleteListing: (id: string) => { if (confirm('Delete listing?')) run(() => db.deleteListing(id)) },
+    deleteListing: (id: string) => {
+      if (!confirm('Delete this listing?\n\nAny open exchanges or offers on it are cancelled, and the other business is notified. This can’t be undone.')) return
+      run(async () => { if (await db.deleteListing(id) == 'retired') alert('Listing deleted. It stays in the other business’s exchange history only.') })
+    },
+    // Profile → Your data. Shared exchanges and offers disappear for you only.
+    deleteMyData: (part: db.DataPart, what: string) => {
+      if (!confirm(`Delete ${what}?\n\nAnything still open is cancelled first and the other business is notified. Shared exchanges and offers are removed from your account only; the other business keeps its copy. This can’t be undone.`)) return
+      run(async () => { const n = await db.deleteMyData(part); alert(`Deleted ${n} ${what}.`) })
+    },
     openNotification: (id: number) => {
       const n = S.N.find(x => x.id == id)
       if (n) run(() => db.markRead(id), () => setUI({ tab: n.tab }))
@@ -194,7 +203,7 @@ function useActions(S: State, setUI: (u: Partial<UI>) => void, refresh: () => Pr
     advance: (id: string) => {
       const t = S.T.find(x => x.id == id)
       if (!t) return
-      // CO2e and each side's money result are estimated with this viewer's logistics assumptions
+      // CO2e and each side's money result are estimated with the platform's logistics assumptions
       // when the exchange completes, then stored so later setting changes don't rewrite history.
       const e = t.step + 1 == 6 ? econ(S, listing(S, t.s) as Supply, listing(S, t.d) as Demand, t.q, 'receiver', t.price) : null
       run(() => db.advanceTransaction(id, e && { co2: e.net, supplier: e.sup, receiver: e.rec }))
@@ -214,9 +223,29 @@ function useActions(S: State, setUI: (u: Partial<UI>) => void, refresh: () => Pr
     startDraft: (d: Draft) => setDraft(d),
     patchDraft: (p: Partial<Draft>) => setDraft(prev => prev && { ...prev, ...p }),
     setInputMode: (inputMode: 'chat' | 'form') => setUI({ inputMode }),
-    setDemoZone: (active: boolean) => run(() => db.setDemoZone({ ...S.zone, active })),
     editDraft: <K extends keyof Draft>(k: K, v: Draft[K]) => setDraft(prev => prev && { ...prev, [k]: v }),
     cancelDraft: () => setDraft(null),
+    // Marketplace "Post a listing for this": a new draft on my side, prefilled from their listing.
+    respondWith: (id: string) => {
+      const x = listing(S, id), base = parseForMe('')
+      const loc = S.me.location && CITY[S.me.location] ? S.me.location : x.loc
+      if (x.type == 'Demand') {
+        const cat = CATEGORIES.find(c => x.accepts?.includes(c.id))
+        setDraft({
+          ...base, type: 'Supply', mat: cleanMaterial(x.keywords?.[0] ?? x.mat), qty: x.max, loc,
+          category: cat?.id ?? '', cond: cat?.cond ?? 'Unknown', uses: [x.use1], price: 0, raw: '', source: undefined,
+          notes: `Prefilled from ${x.biz}’s request. Check every field, answer the compliance questions and tick the declaration.`,
+        })
+      } else {
+        const avail = x.qty - x.done - x.res
+        setDraft({
+          ...base, type: 'Demand', mat: x.mat, keywords: x.mat, qty: +avail.toFixed(2), min: +(avail / 2).toFixed(2), loc,
+          accepts: x.category ? [x.category] : [], use1: x.use[0] ?? 'composting', maxPrice: x.price, maxKm: 300, raw: '', source: undefined,
+          notes: `Prefilled from ${x.biz}’s listing. Check the fields, then publish to match with it.`,
+        })
+      }
+      setUI({ tab: 'Create Listing', inputMode: 'form' })
+    },
     startEdit: (id: string) => {
       const l = listing(S, id)
       if (l.ownerId != S.me.id) return
@@ -303,7 +332,7 @@ function Shell({ S, setUI, refresh, draft, setDraft }: {
     <>
       <header>
         <b>🌱 AgriReuse</b>
-        <span className="demo">Demo: synthetic data and simulated transactions</span>
+        <span className="demo">Payments simulated</span>
         <span style={{ marginLeft: 'auto', fontSize: 14 }}>{S.me.businessName}</span>
         {S.me.canSupply && S.me.canReceive
           ? <span className="switcher" role="group" aria-label="Acting as">

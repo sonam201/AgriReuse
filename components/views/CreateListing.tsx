@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { CITY } from '@/lib/data'
-import { CONDITIONS, USES, businessCount, draftProblems, listingTypeFor } from '@/lib/logic'
+import { TYPICAL_ALTERNATIVE, TYPICAL_DISPOSAL, USES, businessCount, draftProblems, listingTypeFor } from '@/lib/logic'
 import type { Draft, State } from '@/lib/types'
 import type { Actions } from '../App'
 import { ComplianceFields } from '../Compliance'
@@ -87,6 +87,12 @@ export default function CreateListing({ S, A, draft }: { S: State; A: Actions; d
               <span className="s">{voiceStatus}</span>
             </p>
             <p className="s">Uses a free AI model when available, otherwise simple keyword rules. Always check the fields before publishing.</p>
+            {!d && (
+              <p>
+                <span className="s">Prefer to type it all yourself? </span>
+                <button className="btn alt" onClick={A.newDraft}>📝 Start with a blank form</button>
+              </p>
+            )}
           </div>
         </>
       )}
@@ -112,31 +118,20 @@ export default function CreateListing({ S, A, draft }: { S: State; A: Actions; d
 
             {d.type == 'Supply' ? (
               <>
-                <Field label="Condition">
-                  <select value={d.cond} onChange={e => set('cond', e.target.value)}>
-                    {CONDITIONS.map(c => <option key={c}>{c}</option>)}
-                  </select>
-                </Field>
+                {/* Condition and chemical history come from the category and the compliance answers below. */}
                 <Field label="Asking price ($/t, 0 = free)">{numInput('price', 1)}</Field>
-                <Field label="Your disposal cost ($/t)">{numInput('disp', 1)}</Field>
-                <Field label="Chemical history">
-                  <select value={d.chem} onChange={e => set('chem', e.target.value)}>
-                    <option value="unknown">Unknown (needs testing)</option>
-                    <option value="declared-none">No treatment (declared)</option>
-                  </select>
-                </Field>
+                <Field label={`Disposal cost $/t (optional, typical $${TYPICAL_DISPOSAL})`}>{numInput('disp', 1)}</Field>
               </>
             ) : (
               <>
                 <Field label="Intended use">
                   <select value={d.use1} onChange={e => set('use1', e.target.value)}>
-                    {USES.map(u => <option key={u}>{u}</option>)}
+                    {USES.map(u => <option key={u} value={u}>{USE_LABELS[u] ?? u}</option>)}
                   </select>
                 </Field>
                 <Field label="Minimum useful amount (tonnes)">{numInput('min')}</Field>
-                <Field label="Max distance (km)">{numInput('maxKm', 10)}</Field>
                 <Field label="Max price ($/t)">{numInput('maxPrice', 1)}</Field>
-                <Field label="Your current alternative costs ($/t)">{numInput('alt', 1)}</Field>
+                <Field label={`What you pay now $/t (optional, typical $${TYPICAL_ALTERNATIVE})`}>{numInput('alt', 1)}</Field>
               </>
             )}
           </div>
@@ -168,7 +163,9 @@ export default function CreateListing({ S, A, draft }: { S: State; A: Actions; d
                   {c.label}
                 </label>
               ))}
-              <p className="s">Matches in your chosen kinds rank higher; other kinds are left out.</p>
+              <p className="s">A supply matches if it’s one of these kinds OR shares a keyword below. Leave both empty to see every kind.</p>
+              <label htmlFor="kw" style={{ display: 'block', marginTop: 8 }}>Materials you want (keywords, comma separated)</label>
+              <input id="kw" value={d.keywords} maxLength={300} placeholder="e.g. banana, kiwifruit, apple pomace" onChange={e => set('keywords', e.target.value)} />
             </fieldset>
           )}
           {d.type == 'Supply' && <ComplianceFields S={S} A={A} d={d} />}

@@ -26,7 +26,7 @@ export default function ResetPassword({ onDone }: { onDone: () => void }) {
     <>
       <header>
         <b>🌱 AgriReuse</b>
-        <span className="demo">Demo: synthetic data and simulated transactions</span>
+        <span className="demo">Payments simulated</span>
       </header>
       <main style={{ maxWidth: 480 }}>
         <form className="card" onSubmit={submit}>

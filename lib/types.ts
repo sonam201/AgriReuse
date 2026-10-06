@@ -4,13 +4,16 @@ export type GateStatus = 'eligible' | 'restricted' | 'blocked'
 export type Gate = [GateStatus, string]
 
 // role = the starting role picked at sign-up; canSupply/canReceive = what the account may list.
-export interface Profile { id: string; businessName: string; role: Role; location: string | null; canSupply: boolean; canReceive: boolean }
+export interface Profile {
+  id: string; businessName: string; role: Role; location: string | null; canSupply: boolean; canReceive: boolean
+}
 
 // ownerId is null for seeded fictional businesses.
 export interface Supply {
   id: string; type: 'Supply'; ownerId: string | null; biz: string; mat: string; cond: string
   qty: number; loc: string; price: number; disp: number; chem: string; use: string[]
   from: string; to: string; done: number; res: number; arch: boolean; moveR?: boolean
+  deletedAt?: string | null // retired: deleted by its owner but kept for others' exchange history
   // Compliance Check (null/empty on older and seeded listings).
   category?: string | null; suburb?: string | null; answers?: Record<string, string>; declaredAt?: string | null
 }
@@ -19,7 +22,9 @@ export interface Demand {
   id: string; type: 'Demand'; ownerId: string | null; biz: string; mat: string; use1: string
   min: number; max: number; loc: string; maxKm: number; maxPrice: number; alt: number
   accepts?: string[] | null // categories the buyer takes; empty/null = any kind
+  keywords?: string[] | null // materials the buyer wants, e.g. ['banana', 'apple pomace']
   from: string; to: string; arch: boolean
+  deletedAt?: string | null
 }
 
 export type Listing = Supply | Demand
@@ -70,7 +75,7 @@ interface MatchBase { s: Supply; d: Demand; g: Gate; key: string }
 export type BlockKind = 'location' | 'compliance' | 'category' | 'use' | 'min' | 'dates' | 'distance' | 'price'
 export type Match =
   | (MatchBase & { block: string; kinds?: BlockKind[] })
-  | (MatchBase & { block: null; q: number; e: Econ; fac: Factor[]; score: number })
+  | (MatchBase & { block: null; q: number; e: Econ; fac: Factor[]; score: number; notes: string[] })
 
 // The editable listing form. Numbers stay strings while typing; publish() converts and validates.
 export interface Draft {
@@ -84,6 +89,7 @@ export interface Draft {
   // Compliance Check (supply only)
   category: string; suburb: string; answers: Record<string, string>; declared: boolean
   accepts: string[] // demand only: accepted categories (empty = any)
+  keywords: string // demand only: comma-separated materials wanted
   source?: 'ai' | 'rules' // how the fields were filled, shown to the user
   notes?: string          // anything the assistant couldn't map (e.g. an unsupported town)
   editId?: string         // set when editing an existing listing

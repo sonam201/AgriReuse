@@ -1,5 +1,6 @@
 import { supabase } from './supabase'
 import { evaluate, type DemoZone } from './compliance'
+import { TYPICAL_ALTERNATIVE, TYPICAL_DISPOSAL, UNUSED_MAX_KM, chemFromAnswers, costOr, splitKeywords } from './logic'
 import type { Draft, Listing, Notification, Offer, Profile, Tab, Transaction } from './types'
 
 // Maps snake_case database rows to the app's types. Seeded rows have owner_id = null.
@@ -11,11 +12,12 @@ const toListing = (r: Row): Listing => r.type == 'Supply'
       price: r.price, disp: r.disp, chem: r.chem, use: r.uses ?? [], from: r.from_date, to: r.to_date,
       done: r.done, res: r.res, arch: r.arch, moveR: r.move_r,
       category: r.category ?? null, suburb: r.suburb ?? null, answers: r.answers ?? {}, declaredAt: r.declared_at ?? null,
+      deletedAt: r.deleted_at ?? null,
     }
   : {
       id: r.id, type: 'Demand', ownerId: r.owner_id, biz: r.biz, mat: r.mat, use1: r.use1, min: r.min_qty, max: r.max_qty,
       loc: r.loc, maxKm: r.max_km, maxPrice: r.max_price, alt: r.alt, from: r.from_date, to: r.to_date, arch: r.arch,
-      accepts: r.accepts ?? null,
+      accepts: r.accepts ?? null, keywords: r.keywords ?? null, deletedAt: r.deleted_at ?? null,
     }
 
 const toTransaction = (r: Row): Transaction => ({
@@ -61,12 +63,13 @@ export async function loadData(me: Profile) {
     db().from('offers').select('*').order('created_at', { ascending: false }).limit(100),
   ])
   return {
-    L: (check(L) ?? []).map(toListing),
+    L: (check(L) ?? []).map(toListing), // includes retired listings (deletedAt) for exchange history
     T: (check(T) ?? []).map(toTransaction),
     N: (check(N) ?? []).map(toNotification),
     verified: Object.fromEntries((check(V) ?? []).map(v => [v.supply_id + v.demand_id, true as const])),
-    // Missing until the compliance migration runs; then the demo zone is off by default.
-    zone: (Z.error ? null : Z.data?.value as DemoZone | null) ?? { active: false, suburbs: ['Papatoetoe'] },
+    // Official fruit fly controlled areas (suburbs). Off and empty for now; future work: an automatic
+    // feed from MPI notices updates this list and every listing re-checks live.
+    zone: (Z.error ? null : Z.data?.value as DemoZone | null) ?? { active: false, suburbs: [] },
     // Empty until the offers migration runs.
     O: O.error ? [] : (O.data ?? []).map(toOffer),
   }
@@ -77,13 +80,14 @@ function draftRow(d: Draft, zone: DemoZone): Row {
   const common = { mat: d.mat.trim(), loc: d.loc, from_date: d.from, to_date: d.to }
   return d.type == 'Supply'
     ? {
-        ...common, cond: d.cond, qty: +d.qty, price: +d.price, disp: +d.disp, chem: d.chem, uses: d.uses,
+        ...common, cond: d.cond, qty: +d.qty, price: +d.price, disp: costOr(d.disp, TYPICAL_DISPOSAL), chem: chemFromAnswers(d), uses: d.uses,
         // Saved record of the Compliance Check: answers, result, rule tags and the declaration.
         category: d.category, suburb: d.suburb.trim() || null, answers: d.answers,
         compliance: (({ level, rules }) => ({ level, rules: rules.map(r => r.id), checked_at: new Date().toISOString() }))(evaluate(d.category, d.answers, d.suburb, zone)),
         declared_at: d.declared ? new Date().toISOString() : null,
       }
-    : { ...common, use1: d.use1, min_qty: +d.min, max_qty: +d.qty, max_km: +d.maxKm, max_price: +d.maxPrice, alt: +d.alt, accepts: d.accepts.length ? d.accepts : null }
+    : { ...common, use1: d.use1, min_qty: +d.min, max_qty: +d.qty, max_km: UNUSED_MAX_KM, max_price: +d.maxPrice, alt: costOr(d.alt, TYPICAL_ALTERNATIVE), accepts: d.accepts.length ? d.accepts : null,
+        keywords: splitKeywords(d.keywords).length ? splitKeywords(d.keywords) : null }
 }
 
 // owner_id and biz are filled in by the database from the signed-in user's profile.
@@ -100,11 +104,15 @@ export async function updateListing(id: string, d: Draft, zone: DemoZone) {
 export const setArchived = async (id: string, arch: boolean) =>
   check(await db().from('listings').update({ arch }).eq('id', id))
 
-export async function deleteListing(id: string) {
-  const { error } = await db().from('listings').delete().eq('id', id)
-  if (error?.code == '23503') throw new Error('This listing has exchanges, so it can only be archived.')
-  if (error) throw new Error(error.message)
-}
+// Deletes one of my listings (open deals on it are cancelled first). A listing in someone else's
+// exchange history is retired instead: hidden everywhere, kept so their record still makes sense.
+export const deleteListing = async (id: string) =>
+  check(await db().rpc('delete_my_listing', { p_id: id })) as 'deleted' | 'retired'
+
+// "Your data": deletes one part of my history. Shared records are hidden for me only.
+export type DataPart = 'listings' | 'exchanges' | 'offers' | 'notifications'
+export const deleteMyData = async (part: DataPart) =>
+  check(await db().rpc('delete_my_data', { p_part: part })) as number
 
 export const addNotification = async (txt: string, tab: Tab) =>
   check(await db().from('notifications').insert({ txt, tab }))
@@ -150,9 +158,6 @@ export function subscribe(onChange: () => void) {
 export const enableRole = async (id: string, role: 'Supplier' | 'Receiver') =>
   check(await db().from('profiles').update(role == 'Supplier' ? { can_supply: true } : { can_receive: true }).eq('id', id))
 
-// Demo control: switch the demo fruit fly zone on/off for everyone (any signed-in user).
-export const setDemoZone = async (zone: DemoZone) =>
-  check(await db().from('app_settings').update({ value: zone, updated_at: new Date().toISOString() }).eq('key', 'demo_fruit_fly_zone'))
 
 // Offers. The database decides what's allowed; fictional businesses reply immediately.
 export type OfferResult = { status: Offer['status']; offer_id?: string; transaction_id?: string; note?: string }

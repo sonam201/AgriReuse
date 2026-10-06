@@ -6,7 +6,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { CITY } from '@/lib/data'
 import { ALL_USES, CATEGORIES, USE_LABELS, evaluate, questionsFor } from '@/lib/compliance'
-import { addDays, cleanMaterial, draftProblems, f1, today } from '@/lib/logic'
+import { TYPICAL_ALTERNATIVE, TYPICAL_DISPOSAL, addDays, cleanMaterial, draftProblems, f1, today } from '@/lib/logic'
 import type { Draft, State } from '@/lib/types'
 import type { Actions } from './App'
 import { ComplianceDetails } from './Compliance'
@@ -100,7 +100,7 @@ function stepsFor(S: State, d: Draft, asked: Set<string>, understand: (t: string
       apply: v => { const p = parseMoney(String(v)); return p >= 0 ? { price: p } : 'Type a price like “$20”, or tap Free.' },
     })
     add(!asked.has('disp'), {
-      id: 'disp', ask: 'Roughly what would it cost you to dispose of it, per tonne? A guess is fine.', options: [{ value: '0', label: 'Nothing / not sure' }], text: 'e.g. $100',
+      id: 'disp', ask: 'Roughly what would it cost you to dispose of it, per tonne? A guess is fine.', options: [{ value: String(TYPICAL_DISPOSAL), label: `Not sure (use typical $${TYPICAL_DISPOSAL}/t)` }, { value: '0', label: 'Nothing' }], text: 'e.g. $100',
       apply: v => { const p = parseMoney(String(v)); return p >= 0 ? { disp: p } : 'Type an amount like “$100”.' },
     })
     add(!asked.has('uses'), {
@@ -114,6 +114,10 @@ function stepsFor(S: State, d: Draft, asked: Set<string>, understand: (t: string
     })
   } else {
     add(!asked.has('use1'), { id: 'use1', ask: 'What will you use it for?', options: ALL_USES.map(u => ({ value: u, label: USE_LABELS[u] })), apply: v => ({ use1: String(v) }) })
+    add(!asked.has('keywords'), {
+      id: 'keywords', ask: 'Any specific materials you want? Separate them with commas.', text: 'e.g. banana, kiwifruit, apple pomace', skip: 'No, any',
+      apply: v => ({ keywords: String(v).slice(0, 300) }),
+    })
     add(!asked.has('accepts'), {
       id: 'accepts', ask: 'Which kinds of material do you accept? Tick any, or tap Done for any kind.', multi: true,
       options: CATEGORIES.map(x => ({ value: x.id, label: x.label })),
@@ -123,16 +127,12 @@ function stepsFor(S: State, d: Draft, asked: Set<string>, understand: (t: string
       id: 'min', ask: 'What’s the smallest amount worth collecting?', text: 'e.g. 500 kg',
       apply: v => { const q = parseQty(String(v)); return q > 0 && q <= num(d.qty) ? { min: +q.toFixed(3) } : `Type an amount up to ${d.qty} t.` },
     })
-    add(!asked.has('maxKm'), {
-      id: 'maxKm', ask: 'How far would you travel to collect it?', options: ['50', '100', '200', '300'].map(k => ({ value: k, label: k + ' km' })), text: 'or type km',
-      apply: v => { const k = parseMoney(String(v)); return k > 0 ? { maxKm: k } : 'Type a distance in km.' },
-    })
     add(!asked.has('maxPrice'), {
       id: 'maxPrice', ask: 'What’s the most you’d pay per tonne?', options: [{ value: '0', label: 'Free only' }], text: 'e.g. $30',
       apply: v => { const p = parseMoney(String(v)); return p >= 0 ? { maxPrice: p } : 'Type an amount like “$30”.' },
     })
     add(!asked.has('alt'), {
-      id: 'alt', ask: 'What does your current alternative cost per tonne? (Used to show your savings.)', options: [{ value: '0', label: 'Not sure' }], text: 'e.g. $45',
+      id: 'alt', ask: 'What do you pay now for this kind of material, per tonne? (Used to show your savings.)', options: [{ value: String(TYPICAL_ALTERNATIVE), label: `Not sure (use typical $${TYPICAL_ALTERNATIVE}/t)` }], text: 'e.g. $45',
       apply: v => { const p = parseMoney(String(v)); return p >= 0 ? { alt: p } : 'Type an amount like “$45”.' },
     })
   }
@@ -147,10 +147,10 @@ function demoExamples(d: Draft): [string, Partial<Draft>, string][] {
       category: 'fruit_veg', cond: 'Unsellable/overripe', mat: 'Onions', qty: 2, loc: 'Pukekohe', suburb: 'Pukekohe', from, to, price: 0, disp: 80, chem: 'unknown',
       uses: ['composting', 'worm farming', 'feed'], answers: { fruit_fly_zone: 'no', touched_meat: 'no', last_sprayed: 'unknown', condition: 'fresh', is_kiwifruit: 'no' },
     }, 'Expected: 🟠 Needs check (spray withholding period).'],
-    ['🍎 Apples from Papatoetoe', {
+    ['🍎 Apples from a fruit fly zone', {
       category: 'fruit_veg', cond: 'Unsellable/overripe', mat: 'Apples', qty: 1.5, loc: 'Auckland', suburb: 'Papatoetoe', from, to, price: 0, disp: 90, chem: 'declared-none',
-      uses: ['composting', 'worm farming', 'feed', 'pig feed'], answers: { fruit_fly_zone: 'no', touched_meat: 'no', last_sprayed: 'never', condition: 'fresh', is_kiwifruit: 'no' },
-    }, 'Turn the demo fruit fly zone on to see it change to 🔴 Not allowed.'],
+      uses: ['composting', 'worm farming', 'feed', 'pig feed'], answers: { fruit_fly_zone: 'yes', touched_meat: 'no', last_sprayed: 'never', condition: 'fresh', is_kiwifruit: 'no' },
+    }, 'Expected: 🔴 Not allowed (inside a fruit fly controlled area: use MPI bins).'],
     ['🥝 Kiwifruit prunings', {
       category: 'crop_residue', cond: 'Post-harvest residue', mat: 'Kiwifruit prunings', qty: 4, loc: 'Tauranga', suburb: 'Te Puke', from, to, price: 0, disp: 40, chem: 'declared-none',
       uses: ['composting', 'firewood'], answers: { fruit_fly_zone: 'no', kiwi_prunings: 'yes' },
@@ -158,7 +158,7 @@ function demoExamples(d: Draft): [string, Partial<Draft>, string][] {
   ].map(([label, patch, note]) => [label as string, { ...patch as Partial<Draft>, type: d.type }, note as string])
 }
 
-const ALL_STEP_IDS = ['category', 'describe', 'mat', 'qty', 'loc', 'suburb', 'from', 'price', 'disp', 'uses', 'use1', 'accepts', 'min', 'maxKm', 'maxPrice', 'alt']
+const ALL_STEP_IDS = ['category', 'describe', 'mat', 'qty', 'loc', 'suburb', 'from', 'price', 'disp', 'uses', 'use1', 'keywords', 'accepts', 'min', 'maxKm', 'maxPrice', 'alt']
 
 export default function ListingChat({ S, A, draft }: { S: State; A: Actions; draft: Draft | null }) {
   const [history, setHistory] = useState<Msg[]>([])
@@ -319,8 +319,8 @@ export default function ListingChat({ S, A, draft }: { S: State; A: Actions; dra
               <b>{d.mat || '—'}</b> · {f1(d.qty || 0)} t · {d.loc}{d.suburb ? ` (${d.suburb})` : ''} · {d.from} → {d.to}
               <div className="s">
                 {d.type == 'Supply'
-                  ? `${CATEGORIES.find(x => x.id == d.category)?.label ?? ''} · ${num(d.price) == 0 ? 'Free' : `$${d.price}/t`} · disposal $${d.disp}/t · for ${d.uses.map(u => USE_LABELS[u] ?? u).join(', ')}`
-                  : `For ${USE_LABELS[d.use1] ?? d.use1}${d.accepts.length ? ` · accepts ${d.accepts.map(a => CATEGORIES.find(x => x.id == a)?.label ?? a).join(', ')}` : ' · any kind'} · min ${d.min} t · within ${d.maxKm} km · up to $${d.maxPrice}/t · alternative $${d.alt}/t`}
+                  ? `${CATEGORIES.find(x => x.id == d.category)?.label ?? ''} · ${num(d.price) == 0 ? 'Free' : `$${d.price}/t`} · disposal $${d.disp === "" ? TYPICAL_DISPOSAL + " (typical)" : d.disp}/t · for ${d.uses.map(u => USE_LABELS[u] ?? u).join(', ')}`
+                  : `For ${USE_LABELS[d.use1] ?? d.use1}${d.keywords.trim() ? ` · wants ${d.keywords}` : ''}${d.accepts.length ? ` · accepts ${d.accepts.map(a => CATEGORIES.find(x => x.id == a)?.label ?? a).join(', ')}` : ' · any kind'} · min ${d.min} t · up to $${d.maxPrice}/t · usually pay $${d.alt === '' ? TYPICAL_ALTERNATIVE : d.alt}/t`}
               </div>
               {d.type == 'Supply' && <ComplianceDetails c={c} />}
               {d.type == 'Supply' && (

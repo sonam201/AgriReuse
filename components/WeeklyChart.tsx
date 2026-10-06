@@ -35,10 +35,10 @@ export default function WeeklyChart({ buckets, title }: { buckets: Bucket[]; tit
 
   return (
     <div className="chart">
-      <h3>{title}</h3>
+      {title && <h3>{title}</h3>}
       {empty && <p className="s">No completed exchanges in the last {buckets.length} weeks yet.</p>}
       <div style={{ position: 'relative' }} ref={box}>
-      <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label={`${title}, last ${buckets.length} weeks`}>
+      <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label={`${title || 'CO₂e saved per week'}, last ${buckets.length} weeks`}>
         <line x1={0} x2={W} y1={base + 0.5} y2={base + 0.5} stroke="var(--ln)" strokeWidth={1} />
         {buckets.map((b, i) => {
           const h = b.co2 > 0 ? Math.max(2, (b.co2 / max) * plotH) : 0

@@ -109,7 +109,8 @@ export const RULES: Rule[] = [
   },
 ]
 
-// Demo fruit fly zone (toggled live from the app; stored in the database).
+// Official fruit fly controlled areas (suburbs), stored in the database. Currently off and empty.
+// Future work: an automatic feed from MPI notices keeps this list current; listings re-check live.
 export interface DemoZone { active: boolean; suburbs: string[] }
 export const inZone = (suburb: string | null | undefined, zone: DemoZone | null) =>
   !!(zone?.active && suburb && zone.suburbs.some(z => z.toLowerCase() == suburb.trim().toLowerCase()))

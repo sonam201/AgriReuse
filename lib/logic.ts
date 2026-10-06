@@ -9,7 +9,7 @@ export const avail = (l: Supply) => +(l.qty - l.done - l.res).toFixed(3)
 export const listing = (S: State, id: string) => S.L.find(l => l.id == id) as Listing
 export const supplies = (S: State) => S.L.filter((l): l is Supply => l.type == 'Supply')
 export const demands = (S: State) => S.L.filter((l): l is Demand => l.type == 'Demand')
-export const businessCount = (S: State) => new Set(S.L.map(l => l.biz)).size
+export const businessCount = (S: State) => new Set(S.L.filter(l => !l.deletedAt).map(l => l.biz)).size
 
 // Straight-line (haversine) distance between cities, scaled by the road multiplier.
 // Infinity for a town we can't place, so callers treat it as out of range instead of crashing.
@@ -58,43 +58,73 @@ export const categoryOf = (s: Supply): string | null => s.category || INFER.find
 const PERISHABLE = ['fruit_veg', 'processing']
 const catLabel = (id: string) => CATEGORIES.find(c => c.id == id)?.label.toLowerCase() ?? id
 
+// ---- keywords ----
+// Words that say nothing about what the material is.
+const STOP = new Set(['waste', 'wastes', 'material', 'materials', 'the', 'a', 'an', 'of', 'and', 'or', 'for', 'some', 'any',
+  'other', 'mixed', 'organic', 'surplus', 'leftover', 'leftovers', 'stuff', 'plant', 'tonnes', 'tonne', 'kg', 'bulk', 'farm'])
+// Lower-case words, filler removed, simple plurals folded ("bananas" → "banana", "peaches" → "peach").
+export function keywordTokens(text: string) {
+  return [...new Set(text.toLowerCase().split(/[^a-z]+/)
+    .filter(w => w.length > 2 && !STOP.has(w))
+    .map(w => w.endsWith('ies') ? w.slice(0, -3) + 'y' : w.endsWith('ches') || w.endsWith('shes') || w.endsWith('oes') ? w.slice(0, -2) : w.endsWith('s') && !w.endsWith('ss') ? w.slice(0, -1) : w))]
+}
+export const splitKeywords = (text: string) => text.split(/[,;\n]/).map(k => k.trim().toLowerCase()).filter(Boolean).slice(0, 20)
+// Words the supply's material shares with what the buyer asked for (material name + keywords).
+export function sharedKeywords(s: Supply, d: Demand) {
+  const want = new Set(keywordTokens([d.mat, ...(d.keywords ?? [])].join(' ')))
+  return keywordTokens(s.mat).filter(w => want.has(w))
+}
+
+// A match = both listings active, safe to trade, and the material fits: a keyword in common OR a
+// category the buyer takes. Distance is shown but not used for now. Use, dates, amount and price
+// never exclude: they rank the match and show as ⚠ notes.
 export function match(S: State, s: Supply, d: Demand): Match | null {
   if (s.arch || d.arch) return null
   if (s.ownerId && s.ownerId == d.ownerId) return null // an account can't trade with itself
   // Buyers whose use isn't allowed are hidden (a fully blocked listing still shows as "Not allowed").
   const comp = complianceOf(S, s)
   if (comp.level != 'blocked' && comp.hidden.has(d.use1)) return null
-  const why: string[] = [], kinds: BlockKind[] = [], q = Math.min(avail(s), d.max)
-  const no = (k: BlockKind, reason: string) => { kinds.push(k); why.push(reason) }
+  const q = Math.min(avail(s), d.max)
   const key = s.id + d.id, g = gate(S, s, d, key)
+  // Safe to trade, something left
   if (!CITY[s.loc] || !CITY[d.loc]) return { s, d, g, key, block: 'Location not recognised', kinds: ['location'] }
   if (g[0] == 'blocked') return { s, d, g, key, block: s.moveR ? 'Movement restricted' : 'Not allowed: ' + g[1], kinds: ['compliance'] }
+  if (q <= 0) return { s, d, g, key, block: 'Nothing left available', kinds: ['min'] }
+  // Material fits: keyword OR category
+  const words = sharedKeywords(s, d)
   const cat = categoryOf(s), accepts = d.accepts ?? []
-  if (accepts.length && cat && !accepts.includes(cat)) no('category', `Buyer only takes ${accepts.map(catLabel).join(' / ')}`)
-  if (!s.use.includes(d.use1)) no('use', 'Intended use (' + d.use1 + ') not an accepted pathway')
-  if (q < d.min) no('min', 'Quantity: ' + f1(q) + ' t available vs ' + d.min + ' t minimum')
-  if (s.from > d.to || s.to < d.from) no('dates', 'Availability dates do not overlap')
-  const dist = km(S, s.loc, d.loc)
-  if (dist > d.maxKm) no('distance', 'Distance ' + f1(dist) + ' km exceeds ' + d.maxKm + ' km limit')
-  if (s.price > d.maxPrice) no('price', `Price $${s.price}/t is above the buyer's $${d.maxPrice}/t limit`)
-  if (why.length) return { s, d, g, key, block: why.join('; '), kinds }
+  const anyKind = !accepts.length
+  const catHit = !!cat && accepts.includes(cat)
+  if (!words.length && !catHit && !anyKind) {
+    return { s, d, g, key, block: `Different material: they want ${[...(d.keywords ?? []), ...accepts.map(catLabel)].join(', ') || d.mat}`, kinds: ['category'] }
+  }
 
+  // Everything else ranks and explains, never excludes.
+  const notes: string[] = []
+  const useOk = s.use.includes(d.use1)
+  if (!useOk) notes.push(`They want it for ${USE_LABELS[d.use1] ?? d.use1}, which isn’t a use offered`)
+  const datesOk = !(s.from > d.to || s.to < d.from)
+  if (!datesOk) notes.push('Dates don’t overlap')
+  if (q < d.min) notes.push(`Only ${f1(q)} t of their ${d.min} t minimum`)
+  const overBudget = s.price > d.maxPrice
+  if (overBudget) notes.push(`$${s.price}/t is above their $${d.maxPrice}/t budget`)
   const e = econ(S, s, d, q)
-  // Every factor varies between matches (none is "always full marks"), so scores spread out.
-  const categoryFit = !accepts.length ? 0.7 : cat ? 1 : 0.5 // named category beats "takes anything"
-  const savings = d.alt > 0 ? e.rec / (q * d.alt) : 1 - s.price / Math.max(1, d.maxPrice) // share of the buyer's usual cost saved
+  if (e.rec < 0) notes.push(`Costs them ~${money(-e.rec)} more than their usual supply (transport ${money(e.tc)})`)
+
+  const materialFit = words.length && catHit ? 1 : words.length ? 0.8 : catHit ? 0.6 : 0.4 // 0.4 = they take any kind
+  const priceFit = overBudget ? 0 : d.alt > 0 ? e.rec / (q * d.alt) : 1 - s.price / Math.max(1, d.maxPrice)
   const perishable = !!cat && PERISHABLE.includes(cat)
   const start = [s.from, d.from, today()].sort().pop()!
   const horizon = perishable ? 14 : 45 // produce loses value fast; residues and feed keep
-  const timing = 1 - Math.min(daysUntil(start), horizon) / horizon
+  const timing = datesOk ? 1 - Math.min(daysUntil(start), horizon) / horizon : 0
   const fac: Factor[] = [
-    ['Category fit', 20, categoryFit],
-    ['Quantity', 20, Math.min(1, q / d.max)],
-    ['Distance', 20, 1 - dist / d.maxKm],
-    ['Buyer savings', 20, Math.min(1, savings)],
+    ['Material', 20, materialFit],
+    ['Use', 20, useOk ? 1 : 0],
     [perishable ? 'Freshness (sooner is better)' : 'Timing', 20, timing],
+    ['Amount', 20, Math.min(1, q / d.max) * (q < d.min ? 0.5 : 1)],
+    ['Price fit', 20, Math.min(1, priceFit)],
   ]
-  return { s, d, g, key, block: null, q, e, fac, score: Math.round(fac.reduce((a, [, w, v]) => a + w * Math.max(0, v), 0)) }
+  return { s, d, g, key, block: null, q, e, fac, notes, score: Math.round(fac.reduce((a, [, w, v]) => a + w * Math.max(0, v), 0)) }
 }
 
 export function allMatches(S: State): Match[] {
@@ -164,7 +194,7 @@ export function parse(txt: string): Draft {
     price: 0, disp: '', chem: 'unknown',
     uses: uses.length ? uses : ['composting', 'worm farming'],
     use1: uses[0] ?? 'composting', min: q === '' ? '' : +(+q / 2).toFixed(2), maxKm: 120, maxPrice: 30, alt: 45,
-    category: '', suburb: '', answers: {}, declared: false, accepts: [],
+    category: '', suburb: '', answers: {}, declared: false, accepts: [], keywords: '',
     raw: txt, source: 'rules',
   }
 }
@@ -194,15 +224,18 @@ export const fmtKm = (km: number) => km < 1 ? 'same town' : f1(km) + ' km'
 export function matchReasons(m: Extract<Match, { block: null }>) {
   const { s, d, q, e, fac } = m
   const cat = categoryOf(s)
+  const words = sharedKeywords(s, d)
   const start = [s.from, d.from, today()].sort().pop()!, days = daysUntil(start)
   const text: Record<string, string> = {
-    'Category fit': d.accepts?.length && cat ? `buyer wants ${catLabel(cat)}` : `suits ${d.use1}`,
-    Quantity: q >= d.max - 1e-9 ? `fills the whole ${d.max} t request` : `${f1(q)} of ${d.max} t requested`,
-    Distance: e.dist < 1 ? 'same town' : `${f1(e.dist)} km away`,
-    'Buyer savings': e.rec > 0 ? `buyer saves ~$${Math.round(e.rec / q)}/t` : s.price == 0 ? 'free material' : 'within budget',
+    Material: words.length ? `they asked for “${words.join(', ')}”` : cat && d.accepts?.includes(cat) ? `they take ${catLabel(cat)}` : 'they take any kind',
+    Use: `for ${USE_LABELS[d.use1] ?? d.use1}`,
+    Amount: q >= d.max - 1e-9 ? `covers their whole ${d.max} t` : `${f1(q)} of the ${d.max} t they want`,
+    'Price fit': e.rec > 0 ? `they save ~$${Math.round(e.rec / q)}/t` : s.price == 0 ? 'free material' : 'within budget',
   }
   const timing = days <= 0 ? 'available now' : `ready in ${days} day${days == 1 ? '' : 's'}`
+  // Only the strengths: weak factors are already explained by the match's notes.
   return [...fac]
+    .filter(([, , v]) => v >= 0.5)
     .sort((a, b) => b[2] - a[2])
     .map(([name]) => text[name] ?? timing)
     .slice(0, 3)
@@ -263,7 +296,7 @@ export function draftProblems(d: Draft): string[] {
   else if (isDate(d.from) && d.to < d.from) p.push('End date must be on or after the start date')
   if (d.type == 'Supply') {
     if (!(num(d.price) >= 0)) p.push('Asking price must be 0 or more')
-    if (!(num(d.disp) >= 0)) p.push('Add your disposal cost per tonne (an estimate is fine)')
+    if (d.disp !== '' && !(num(d.disp) >= 0)) p.push('Disposal cost must be 0 or more (or leave it blank)')
     if (!d.uses.length) p.push('Tick at least one accepted use')
     if (!CATEGORIES.some(c => c.id == d.category)) p.push('Choose a category')
     else if (evaluate(d.category, d.answers, d.suburb, null).unanswered.length) p.push('Answer all the compliance questions')
@@ -271,9 +304,8 @@ export function draftProblems(d: Draft): string[] {
   } else {
     if (!(num(d.min) > 0)) p.push('Minimum quantity must be more than 0')
     else if (num(d.min) > num(d.qty)) p.push('Minimum quantity can’t be more than the quantity needed')
-    if (!(num(d.maxKm) > 0)) p.push('Max distance must be more than 0 km')
     if (!(num(d.maxPrice) >= 0)) p.push('Max price must be 0 or more')
-    if (!(num(d.alt) >= 0)) p.push('Alternative cost must be 0 or more')
+    if (d.alt !== '' && !(num(d.alt) >= 0)) p.push('Alternative cost must be 0 or more (or leave it blank)')
   }
   return p
 }
@@ -283,10 +315,10 @@ export function listingToDraft(l: Listing): Draft {
   const common = { mat: l.mat, loc: l.loc, from: l.from, to: l.to, raw: '', editId: l.id, declared: false }
   return l.type == 'Supply'
     ? { ...common, type: 'Supply', cond: l.cond, qty: l.qty, price: l.price, disp: l.disp, chem: l.chem, uses: l.use,
-        category: l.category ?? '', suburb: l.suburb ?? '', answers: l.answers ?? {}, accepts: [],
+        category: l.category ?? '', suburb: l.suburb ?? '', answers: l.answers ?? {}, accepts: [], keywords: '',
         use1: 'composting', min: '', maxKm: 120, maxPrice: 30, alt: 45 }
     : { ...common, type: 'Demand', cond: 'Unknown', qty: l.max, price: 0, disp: 0, chem: 'unknown', uses: [],
-        category: '', suburb: '', answers: {}, accepts: l.accepts ?? [],
+        category: '', suburb: '', answers: {}, accepts: l.accepts ?? [], keywords: (l.keywords ?? []).join(', '),
         use1: l.use1, min: l.min, maxKm: l.maxKm, maxPrice: l.maxPrice, alt: l.alt }
 }
 
@@ -303,15 +335,10 @@ export function cleanMaterial(text: string) {
   return (t.charAt(0).toUpperCase() + t.slice(1)).slice(0, 80)
 }
 
-// Pairs that only miss on things an offer can stretch, and only by a realistic amount: any price
-// (the other side can counter), up to 1.5× the buyer's distance, at least half their minimum load.
-const STRETCHABLE: BlockKind[] = ['price', 'distance', 'min']
-export const offerable = (S: State) => (m: Match): m is Extract<Match, { block: string }> =>
-  m.block !== null && !!m.kinds?.length && m.kinds.every(k => STRETCHABLE.includes(k))
-  && km(S, m.s.loc, m.d.loc) <= m.d.maxKm * 1.5 && avail(m.s) >= m.d.min * 0.5
 
 export interface CoachTip { id: string; label: string; detail: string; gain: number; patch: Partial<Supply> & Partial<Demand> }
-export interface Coach { matched: number; blockers: [BlockKind, number][]; tips: CoachTip[]; nearMisses: number }
+// matched = good matches (no notes); tips are ranked by how many more good matches each adds.
+export interface Coach { matched: number; blockers: [BlockKind, number][]; tips: CoachTip[] }
 
 // For one of my listings: current matches, the main blockers, and one-change fixes ranked by how
 // many extra matches each unlocks (each counted by re-running the real matching).
@@ -321,9 +348,11 @@ export function coach(S: State, l: Listing): Coach {
     const me = { ...l, ...patch } as Listing
     return me.type == 'Supply' ? match(S, me, o as Demand) : match(S, o as Supply, me as Demand)
   })
-  const count = (patch: Partial<Supply> & Partial<Demand>) => results(patch).filter(m => m && m.block === null).length
+  // "Good" matches: matched with nothing to flag (within budget, enough tonnes, a kind they take).
+  const good = (m: Match | null) => !!m && m.block === null && m.notes.length == 0
+  const count = (patch: Partial<Supply> & Partial<Demand>) => results(patch).filter(good).length
   const now = results({})
-  const matched = now.filter(m => m && m.block === null).length
+  const matched = now.filter(good).length
   const tally = new Map<BlockKind, number>()
   for (const m of now) if (m && m.block !== null) for (const k of m.kinds ?? []) tally.set(k, (tally.get(k) ?? 0) + 1)
 
@@ -348,9 +377,6 @@ export function coach(S: State, l: Listing): Coach {
     const prices = [...new Set(others.map(o => (o as Supply).price).filter(p => p > l.maxPrice))].sort((a, b) => a - b)
     const p = prices.find(x => count({ maxPrice: x }) > matched)
     if (p !== undefined) tryTip('price', `Raise your max price to $${p}/t`, 'what these sellers are asking', { maxPrice: p })
-    const kms = [100, 150, 200, 300, 500].filter(k => k > l.maxKm)
-    const k = kms.find(x => count({ maxKm: x }) > matched)
-    if (k !== undefined) tryTip('km', `Travel up to ${k} km`, `currently ${l.maxKm} km`, { maxKm: k })
     if (l.accepts?.length) tryTip('any', 'Accept any kind of material', 'currently ' + l.accepts.map(catLabel).join(', '), { accepts: [] })
     if (l.min > 0.5) tryTip('min', `Accept loads from ${+(l.min / 2).toFixed(2)} t`, `currently ${l.min} t minimum`, { min: +(l.min / 2).toFixed(2) })
     tryTip('extend', 'Extend your dates 2 weeks', `until ${extendTo}`, { to: extendTo })
@@ -360,6 +386,30 @@ export function coach(S: State, l: Listing): Coach {
     matched,
     blockers: [...tally.entries()].sort((a, b) => b[1] - a[1]),
     tips: tips.slice(0, 4),
-    nearMisses: now.filter(m => m && offerable(S)(m)).length,
   }
+}
+
+// An offer can bridge price, amount or transport cost, but the database won't accept one that
+// changes the use, the dates or a kind of material the buyer doesn't take.
+export function canOffer(m: Extract<Match, { block: null }>) {
+  const needs = m.s.price > m.d.maxPrice || m.q < m.d.min || m.e.rec < 0
+  const kindOk = !m.d.accepts?.length || !m.s.category || m.d.accepts.includes(m.s.category)
+  const datesOk = !(m.s.from > m.d.to || m.s.to < m.d.from)
+  return needs && kindOk && datesOk && m.s.use.includes(m.d.use1)
+}
+
+// ---- form defaults ----
+// Typical costs used when the seller/buyer leaves them blank (illustrative, for the $ estimates only).
+export const TYPICAL_DISPOSAL = 100 // $/t to dump organic waste
+export const TYPICAL_ALTERNATIVE = 40 // $/t a buyer pays for their usual material
+export const UNUSED_MAX_KM = 300 // distance isn't used for matching; stored for older code paths
+export const costOr = (v: number | string, typical: number) => (v === '' || v === null || isNaN(Number(v)) ? typical : Number(v))
+
+// Chemical history comes from the spray question (no separate field): never sprayed or a while ago
+// counts as declared untreated; recently or unknown needs a test. Categories without the question
+// rely on the seller declaration.
+export function chemFromAnswers(d: Pick<Draft, 'answers' | 'chem'>) {
+  const a = d.answers?.last_sprayed
+  if (!a) return 'declared-none'
+  return a == 'never' || a == 'not_recent' ? 'declared-none' : 'unknown'
 }
