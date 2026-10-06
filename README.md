@@ -28,3 +28,4 @@ all businesses (fictional). No carbon credits.
 
 ## Known limitations
 No automated tests yet; no listing editing after creation; no sensitivity table; no live Gemini function. Data lives in browser localStorage (Profile > Reset demo data).
+# AgriReuse
